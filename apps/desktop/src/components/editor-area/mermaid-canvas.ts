@@ -25,6 +25,7 @@ export const MERMAID_CANVAS_HEIGHT = 480;
 
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 4;
+const MIN_FIT_ZOOM = 0.01;
 const BUTTON_ZOOM_FACTOR = 1.2;
 const KEY_ZOOM_FACTOR = 1.15;
 const WHEEL_ZOOM_SENSITIVITY = 0.0015;
@@ -202,7 +203,7 @@ export function mountMermaidCanvas(
   // The fit zoom of the current diagram. Zooming out stops at ZOOM_MIN, or
   // at the fit for a diagram too big to fit at ZOOM_MIN, so the whole
   // diagram can always be brought back into view.
-  let fitZoom = 1;
+  let fitZoom = ZOOM_MIN;
 
   function clampZoom(z: number): number {
     return Math.max(Math.min(ZOOM_MIN, fitZoom), Math.min(ZOOM_MAX, z));
@@ -218,7 +219,12 @@ export function mountMermaidCanvas(
     // Fit to fill: scale so the diagram fills one axis with FIT_MARGIN_PX
     // breathing room. Small diagrams scale up (capped at ZOOM_MAX), large
     // diagrams scale down as far as it takes to show all of them.
-    fitZoom = Math.min((vw - FIT_MARGIN_PX * 2) / naturalW, (vh - FIT_MARGIN_PX * 2) / naturalH);
+    // Floored above 0: a viewport narrower than the margins would give a
+    // zero or negative fit, and zooming divides by the zoom.
+    fitZoom = Math.max(
+      MIN_FIT_ZOOM,
+      Math.min((vw - FIT_MARGIN_PX * 2) / naturalW, (vh - FIT_MARGIN_PX * 2) / naturalH),
+    );
     state.zoom = clampZoom(fitZoom);
     state.panX = (vw - naturalW * state.zoom) / 2;
     state.panY = (vh - naturalH * state.zoom) / 2;
@@ -381,7 +387,9 @@ export function mountMermaidCanvas(
     // `textContent` only: Pele's messages quote the diagram source.
     const errEl = document.createElement("div");
     errEl.className = "cm-mermaid-canvas-error";
-    errEl.setAttribute("role", "alert");
+    // Polite: an error rebuilds on every debounced edit while the source is
+    // being fixed, and an assertive alert would interrupt each time.
+    errEl.setAttribute("role", "status");
     const title = document.createElement("div");
     title.className = "cm-mermaid-canvas-error-title";
     title.textContent = "Can’t draw this diagram";

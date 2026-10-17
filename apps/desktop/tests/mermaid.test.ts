@@ -128,14 +128,28 @@ describe("renderMermaid", () => {
     consoleError.mockRestore();
   });
 
-  test("does not cache errors, so a fixed renderer recovers", () => {
+  test("reports a non-Error throw by its string value", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(pele.render).mockImplementationOnce(() => {
+      throw "string error";
+    });
+    expect(renderMermaid(DIAGRAMS.pie).error).toBe("Unexpected error: string error");
+  });
+
+  test("caches errors, so an invalid diagram is parsed and logged once", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.mocked(pele.render).mockImplementationOnce(() => {
       throw new TypeError("boom");
     });
-    expect(renderMermaid(DIAGRAMS.pie).error).toBeDefined();
-    expect(renderMermaid(DIAGRAMS.pie).svg).toBeDefined();
-    vi.mocked(console.error).mockRestore();
+    const first = renderMermaid(DIAGRAMS.pie);
+    expect(renderMermaid(DIAGRAMS.pie)).toBe(first);
+    expect(pele.render).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledOnce();
+  });
+
+  test("returns an error for a diagram over Pele's size limit", () => {
+    const huge = "flowchart TD\n" + "  A --> B\n".repeat(6000);
+    expect(renderMermaid(huge).error).toMatch(/limit/);
   });
 
   test("leaves click links inert so the webview can't navigate away", () => {
@@ -186,6 +200,18 @@ describe("sanitizeSvg", () => {
     },
   );
 
+  test("ignores hooks other code registers on the shared DOMPurify", async () => {
+    const { default: shared } = await import("dompurify");
+    shared.addHook("afterSanitizeAttributes", (node) => node.setAttribute("data-hooked", ""));
+    try {
+      expect(sanitizeSvg('<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>')).not.toContain(
+        "data-hooked",
+      );
+    } finally {
+      shared.removeHooks("afterSanitizeAttributes");
+    }
+  });
+
   test("strips scripts, event handlers and javascript: links", () => {
     const clean = sanitizeSvg(
       '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script>' +
@@ -223,7 +249,11 @@ describe("Pele theme mapping", () => {
       path.join(import.meta.dirname, "../src/components/editor-area/mermaid-canvas.css"),
       "utf8",
     );
-    const missing = [...used].filter((v) => !UNMAPPED.has(v) && !canvasCss.includes(`${v}:`));
+    // Declarations inside the `.cm-mermaid-canvas { … }` rule that maps the
+    // theme, not mentions in comments or other rules.
+    const rule = canvasCss.match(/^\.cm-mermaid-canvas \{([\s\S]*?)^\}/m)?.[1] ?? "";
+    const declared = new Set([...rule.matchAll(/^\s*(--pele-[a-z0-9-]+):/gm)].map((m) => m[1]));
+    const missing = [...used].filter((v) => !UNMAPPED.has(v) && !declared.has(v));
     expect(used.size).toBeGreaterThan(8);
     expect(missing).toEqual([]);
   });
@@ -274,7 +304,7 @@ describe("mermaid canvas frame", () => {
       ariaLabel: "Mermaid diagram",
     });
     const error = host.querySelector(".cm-mermaid-canvas-error");
-    expect(error?.getAttribute("role")).toBe("alert");
+    expect(error?.getAttribute("role")).toBe("status");
     expect(host.querySelector("img")).toBeNull();
     expect(host.querySelector(".cm-mermaid-canvas-error-msg")?.textContent).toBe(
       'Parse error: <img src=x onerror="alert(1)">',
@@ -494,6 +524,65 @@ describe("mermaidDecorations always replaces the fence", () => {
       if ((deco as unknown as { spec?: { widget?: unknown } }).spec?.widget) widgets++;
     });
     expect(widgets).toBe(0);
+  });
+});
+
+describe("Mermaid widget in a live editor", () => {
+  async function mount(doc: string) {
+    const { EditorView } = await import("@codemirror/view");
+    const parent = document.createElement("div");
+    document.body.append(parent);
+    const view = new EditorView({
+      parent,
+      state: withFullParse(
+        EditorState.create({
+          doc,
+          extensions: [markdown({ extensions: [GFM] }), mermaidDecorations()],
+        }),
+      ),
+    });
+    return { view, cleanup: () => (view.destroy(), parent.remove()) };
+  }
+
+  test("renders the fence through Pele and reuses its DOM when the source changes", async () => {
+    const fence = "```mermaid\nflowchart LR\n  A --> B\n```";
+    const { view, cleanup } = await mount(`intro\n${fence}\noutro`);
+    const widget = view.dom.querySelector(".cm-mermaid-widget");
+    expect(widget?.querySelector("svg.pele-flowchart")).not.toBeNull();
+
+    // An outside edit to the body (undo, another cursor): the widget isn't
+    // `eq` any more, `updateDOM` keeps the wrapper and swaps the diagram.
+    const bodyFrom = view.state.doc.toString().indexOf("flowchart");
+    view.dispatch({
+      changes: {
+        from: bodyFrom,
+        to: bodyFrom + "flowchart LR\n  A --> B".length,
+        insert: 'pie\n  "A" : 1',
+      },
+    });
+    const after = view.dom.querySelector(".cm-mermaid-widget");
+    expect(after).toBe(widget);
+    expect(after?.querySelector("svg.pele-pie")).not.toBeNull();
+
+    // Breaking the diagram shows the error in the same frame.
+    const pieFrom = view.state.doc.toString().indexOf("pie");
+    view.dispatch({ changes: { from: pieFrom, to: pieFrom + 3, insert: "nonsense" } });
+    expect(after?.querySelector(".cm-mermaid-canvas-error")).not.toBeNull();
+    cleanup();
+  });
+});
+
+describe("openMermaidFullscreen", () => {
+  test("opens on an invalid diagram with the error, and Escape closes it", async () => {
+    const { openMermaidFullscreen } =
+      await import("../src/components/editor-area/mermaid-fullscreen");
+    openMermaidFullscreen("flowchart TD\n  A -->", "Mermaid diagram");
+    const overlay = document.querySelector(".cm-mermaid-fullscreen");
+    expect(overlay?.querySelector(".cm-mermaid-canvas-error")).not.toBeNull();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(overlay?.classList.contains("is-open")).toBe(false);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(document.querySelector(".cm-mermaid-fullscreen")).toBeNull();
   });
 });
 
