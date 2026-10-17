@@ -1,114 +1,336 @@
-import { describe, expect, test, vi, beforeEach } from "vite-plus/test";
+// @vitest-environment jsdom
+// jsdom for DOMPurify (the renderer sanitises Pele's SVG) and for mounting
+// the canvas. Pele itself runs for real: without a canvas it measures labels
+// from its built-in width table, so layouts are deterministic here.
+import { describe, expect, test, vi, beforeEach, afterEach } from "vite-plus/test";
+import fs from "node:fs";
+import path from "node:path";
 
-// Mock beautiful-mermaid before importing the renderer
-vi.mock("beautiful-mermaid", () => {
-  const renderMermaidSVG = vi
-    .fn()
-    .mockReturnValue('<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>');
-  return { renderMermaidSVG };
+// Wrap Pele's `render` in a spy (same implementation) so tests can count
+// renders and inject a renderer failure.
+vi.mock("pele", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("pele")>();
+  return { ...actual, render: vi.fn(actual.render) };
 });
 
-// Import after mock setup
-const { renderMermaid, clearMermaidCache } =
+const pele = await import("pele");
+const { renderMermaid, clearMermaidCache, sanitizeSvg } =
   await import("../src/components/editor-area/mermaid-renderer");
+
+// One small source per diagram type Pele supports that Writer's notes are
+// likely to hold, keyed by the class Pele puts on the root `<svg>`.
+const DIAGRAMS: Record<string, string> = {
+  flowchart:
+    "flowchart LR\n  A[Draft] --> B{Ready?}\n  B -- Yes --> C[Publish]\n  subgraph S\n    C\n  end",
+  sequence: "sequenceDiagram\n  A->>B: Save\n  B-->>A: OK\n  Note over A,B: local",
+  class:
+    "classDiagram\n  class Note {\n    +String title\n    +save() bool\n  }\n  Note <|-- Daily",
+  state: "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Editing : key\n  Editing --> [*]",
+  er: "erDiagram\n  NOTE ||--o{ TAG : has\n  NOTE {\n    string path PK\n  }",
+  gantt:
+    "gantt\n  dateFormat YYYY-MM-DD\n  section A\n    Task :done, a1, 2026-10-01, 3d\n    Next :crit, after a1, 1d",
+  pie: 'pie\n  "A" : 3\n  "B" : 5',
+  journey: "journey\n  title J\n  section S\n    Step: 5: Me",
+  gitGraph: "gitGraph\n  commit\n  branch f\n  commit\n  checkout main\n  merge f",
+  mindmap: "mindmap\n  root((W))\n    A\n    B",
+  timeline: "timeline\n  2026 : One\n  2027 : Two",
+  quadrantChart: "quadrantChart\n  x-axis Low --> High\n  y-axis Low --> High\n  P: [0.3, 0.8]",
+  xychart: "xychart-beta\n  x-axis [a, b]\n  bar [1, 2]\n  line [2, 1]",
+  sankey: "sankey-beta\nA,B,5\nA,C,3",
+  block: "block-beta\n  columns 2\n  A B",
+  architecture: "architecture-beta\n  service a(server)[A]\n  service b(disk)[B]\n  a:R --> L:b",
+  kanban: "kanban\n  todo[To do]\n    t1[One]",
+  requirement:
+    "requirementDiagram\n  requirement r {\n    id: 1\n    text: t\n  }\n  element e {\n    type: lib\n  }\n  e - satisfies -> r",
+  c4: 'C4Context\n  Person(p, "P")\n  System(s, "S")\n  Rel(p, s, "uses")',
+  packet: 'packet-beta\n  0-15: "Source"\n  16-31: "Dest"',
+  radar: 'radar-beta\n  axis a, b, c\n  curve x["X"]{1, 2, 3}',
+  treemap: 'treemap-beta\n"Root"\n  "A": 1\n  "B": 2',
+};
+
+// Serialise markup through the DOM so attribute quoting and order compare
+// equal for equivalent trees.
+function normalise(markup: string): string {
+  const template = document.createElement("template");
+  template.innerHTML = markup;
+  return template.innerHTML;
+}
+
+// The result of a source that must render, narrowed to the success shape.
+function rendered(source: string) {
+  const result = renderMermaid(source);
+  if (result.error !== undefined) throw new Error(result.error);
+  return result;
+}
 
 describe("renderMermaid", () => {
   beforeEach(() => {
     clearMermaidCache();
-    vi.clearAllMocks();
+    vi.mocked(pele.render).mockClear();
   });
 
-  test("renders valid mermaid source and returns SVG", () => {
-    const result = renderMermaid("graph TD;\n  A-->B;");
-    expect(result.svg).toBeDefined();
-    expect(result.error).toBeUndefined();
-    expect(result.svg).toContain("<svg");
+  test.each(Object.entries(DIAGRAMS))("renders a %s diagram through Pele", (type, source) => {
+    const result = rendered(source);
+    expect(result.svg).toMatch(new RegExp(`^<svg[^>]*class="pele pele-${type}"`));
+    expect(result.width).toBeGreaterThan(0);
+    expect(result.height).toBeGreaterThan(0);
   });
 
-  test("returns cached SVG on second call with same source", async () => {
-    const { renderMermaidSVG } = await import("beautiful-mermaid");
-
-    const result1 = renderMermaid("graph TD;\n  A-->B;");
-    expect(result1.svg).toBeDefined();
-
-    const result2 = renderMermaid("graph TD;\n  A-->B;");
-    expect(result2.svg).toBe(result1.svg);
-
-    expect(renderMermaidSVG).toHaveBeenCalledTimes(1);
+  test("asks for a fixed-size SVG the canvas can scale", () => {
+    const result = rendered(DIAGRAMS.flowchart);
+    const svg = normalise(result.svg);
+    expect(svg).not.toContain("max-width:100%");
+    expect(svg).toContain(`width="${result.width}"`);
+    expect(svg).toContain(`viewBox="0 0 ${result.width} ${result.height}"`);
   });
 
-  test("returns error result when the renderer throws", async () => {
-    const { renderMermaidSVG } = await import("beautiful-mermaid");
-    vi.mocked(renderMermaidSVG).mockImplementationOnce(() => {
-      throw new Error("Parse error in mermaid");
-    });
+  test("returns the cached result on a second call with the same source", () => {
+    const first = renderMermaid(DIAGRAMS.flowchart);
+    const second = renderMermaid(DIAGRAMS.flowchart);
+    expect(second).toBe(first);
+    expect(pele.render).toHaveBeenCalledTimes(1);
+  });
 
-    const result = renderMermaid("not valid mermaid");
-    expect(result.error).toBeDefined();
-    expect(result.error).toBe("Parse error in mermaid");
+  test("renders again when the UI font setting changes, in the new font", () => {
+    const root = document.documentElement;
+    root.style.setProperty("--ui-font", "Avenir, sans-serif");
+    const avenir = renderMermaid(DIAGRAMS.flowchart);
+    root.style.setProperty("--ui-font", "Georgia, serif");
+    const georgia = renderMermaid(DIAGRAMS.flowchart);
+    root.style.removeProperty("--ui-font");
+    expect(pele.render).toHaveBeenCalledTimes(2);
+    // Pele writes the measured font as the `--pele-font` fallback.
+    expect(avenir.svg).toContain("font-family:var(--pele-font,Avenir, sans-serif)");
+    expect(georgia.svg).toContain("font-family:var(--pele-font,Georgia, serif)");
+  });
+
+  test("returns Pele's message for a syntax error", () => {
+    const result = renderMermaid("flowchart TD\n  A --> B -->\n  C[[[ broken");
     expect(result.svg).toBeUndefined();
+    expect(result.error).toContain("Parse error on line 3");
+    // The message quotes the line and marks the column.
+    expect(result.error).toContain("C[[[ broken");
   });
 
-  test("handles non-Error thrown values", async () => {
-    const { renderMermaidSVG } = await import("beautiful-mermaid");
-    vi.mocked(renderMermaidSVG).mockImplementationOnce(() => {
-      throw "string error";
+  test("returns an error for a diagram type Pele doesn't know", () => {
+    const result = renderMermaid("zenuml\n  Alice->Bob: hi");
+    expect(result.error).toBe("No diagram type detected for the given text.");
+  });
+
+  test("reports a renderer bug as unexpected and logs it", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(pele.render).mockImplementationOnce(() => {
+      throw new TypeError("x is undefined");
     });
-
-    const result = renderMermaid("bad source");
-    expect(result.error).toBe("string error");
-    expect(result.svg).toBeUndefined();
+    const result = renderMermaid("flowchart TD\n  A --> B");
+    expect(result.error).toBe("Unexpected error: x is undefined");
+    expect(consoleError).toHaveBeenCalledOnce();
+    consoleError.mockRestore();
   });
 
-  test("strips <script> blocks from the rendered SVG", async () => {
-    const { renderMermaidSVG } = await import("beautiful-mermaid");
-    vi.mocked(renderMermaidSVG).mockReturnValueOnce(
-      '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><rect/></svg>',
-    );
-
-    const result = renderMermaid("xss-script");
-    expect(result.svg).toBeDefined();
-    expect(result.svg).not.toContain("<script");
-    expect(result.svg).not.toContain("alert(1)");
-    expect(result.svg).toContain("<rect");
+  test("does not cache errors, so a fixed renderer recovers", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(pele.render).mockImplementationOnce(() => {
+      throw new TypeError("boom");
+    });
+    expect(renderMermaid(DIAGRAMS.pie).error).toBeDefined();
+    expect(renderMermaid(DIAGRAMS.pie).svg).toBeDefined();
+    vi.mocked(console.error).mockRestore();
   });
 
-  test("strips self-closing <script/> tags from the rendered SVG", async () => {
-    const { renderMermaidSVG } = await import("beautiful-mermaid");
-    vi.mocked(renderMermaidSVG).mockReturnValueOnce(
-      '<svg xmlns="http://www.w3.org/2000/svg"><script src="evil.js"/><rect/></svg>',
+  test("leaves click links inert so the webview can't navigate away", () => {
+    const result = renderMermaid(
+      'flowchart LR\n  A --> B\n  click A "https://example.com" "Open"\n  click B "javascript:alert(1)"',
     );
-
-    const result = renderMermaid("xss-script-selfclosing");
     expect(result.svg).toBeDefined();
-    expect(result.svg).not.toContain("<script");
-    expect(result.svg).not.toContain("evil.js");
+    expect(result.svg).not.toContain("<a");
+    expect(result.svg).not.toContain("example.com");
+    expect(result.svg).not.toContain("javascript:");
   });
 
-  test("strips on*= event handler attributes from the rendered SVG", async () => {
-    const { renderMermaidSVG } = await import("beautiful-mermaid");
-    vi.mocked(renderMermaidSVG).mockReturnValueOnce(
-      '<svg xmlns="http://www.w3.org/2000/svg"><rect onclick="alert(1)" onmouseover=\'evil()\' onload=stealCookies() /></svg>',
-    );
+  test("gives different diagrams different accessible-title ids", () => {
+    const a = renderMermaid("flowchart LR\n  accTitle: First\n  A --> B");
+    const b = renderMermaid("flowchart LR\n  accTitle: Second\n  A --> B");
+    const ids = (svg: string) => [...svg.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]);
+    expect(ids(a.svg!).length).toBeGreaterThan(0);
+    expect(ids(a.svg!).filter((id) => ids(b.svg!).includes(id))).toEqual([]);
+  });
 
-    const result = renderMermaid("xss-handlers");
-    expect(result.svg).toBeDefined();
-    expect(result.svg).not.toContain("onclick");
-    expect(result.svg).not.toContain("onmouseover");
-    expect(result.svg).not.toContain("onload");
-    expect(result.svg).not.toContain("alert(1)");
-    expect(result.svg).not.toContain("evil()");
-    expect(result.svg).not.toContain("stealCookies");
-    expect(result.svg).toContain("<rect");
+  test("drops HTML from labels", () => {
+    const result = renderMermaid('flowchart LR\n  A["<img src=x onerror=alert(1)>"] --> B');
+    const stage = document.createElement("div");
+    stage.innerHTML = result.svg!;
+    expect(stage.querySelector("img")).toBeNull();
+    expect(result.svg).not.toContain("onerror");
   });
 });
 
-const { MERMAID_CANVAS_HEIGHT } = await import("../src/components/editor-area/mermaid-canvas");
+describe("sanitizeSvg", () => {
+  // The sanitiser must not cost a diagram anything: the root `style` holds
+  // every `var(--pele-*)` colour and the canvas sizes the SVG from it.
+  const EXTRAS: Record<string, string> = {
+    "accessible title": "flowchart LR\n  accTitle: T\n  accDescr: D\n  A --> B",
+    "rich label": 'flowchart LR\n  A["`**bold** _it_`"] --> B["line<br/>two"]',
+    image: 'flowchart LR\n  A@{ img: "https://example.com/a.png", label: "I", w: 60, h: 60 } --> B',
+  };
+
+  test.each(Object.entries({ ...DIAGRAMS, ...EXTRAS }))(
+    "keeps Pele's %s output intact",
+    (_type, source) => {
+      const raw = vi.mocked(pele.render).getMockImplementation()!(source, {
+        responsive: false,
+        links: false,
+        idPrefix: "t",
+      }).svg;
+      expect(normalise(sanitizeSvg(raw))).toBe(normalise(raw));
+    },
+  );
+
+  test("strips scripts, event handlers and javascript: links", () => {
+    const clean = sanitizeSvg(
+      '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script>' +
+        '<rect onclick="alert(2)" width="1" height="1"/>' +
+        '<a href="javascript:alert(3)"><text>x</text></a>' +
+        '<foreignObject><div onmouseover="alert(4)">y</div></foreignObject></svg>',
+    );
+    expect(clean).not.toMatch(/script|onclick|onmouseover|javascript:|foreignObject/i);
+    expect(clean).toContain("<rect");
+  });
+});
+
+describe("Pele theme mapping", () => {
+  // Every colour variable Pele reads must be mapped onto the app's tokens,
+  // or that part of a diagram keeps Pele's light-theme default in dark mode.
+  // Fonts are deliberately unset (see `diagramFonts`); weights, radius and
+  // the `mount()`-only error colour keep Pele's defaults.
+  const UNMAPPED = new Set([
+    "--pele-font",
+    "--pele-font-mono",
+    "--pele-title-weight",
+    "--pele-heading-weight",
+    "--pele-bold-weight",
+    "--pele-radius",
+    "--pele-error",
+  ]);
+
+  test("mermaid-canvas.css sets every colour variable the diagrams use", () => {
+    const used = new Set<string>();
+    for (const source of Object.values(DIAGRAMS)) {
+      const svg = vi.mocked(pele.render).getMockImplementation()!(source, {}).svg;
+      for (const m of svg.matchAll(/var\((--pele-[a-z0-9-]+)/g)) used.add(m[1]);
+    }
+    const canvasCss = fs.readFileSync(
+      path.join(import.meta.dirname, "../src/components/editor-area/mermaid-canvas.css"),
+      "utf8",
+    );
+    const missing = [...used].filter((v) => !UNMAPPED.has(v) && !canvasCss.includes(`${v}:`));
+    expect(used.size).toBeGreaterThan(8);
+    expect(missing).toEqual([]);
+  });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+const { MERMAID_CANVAS_HEIGHT, mountMermaidCanvas } =
+  await import("../src/components/editor-area/mermaid-canvas");
 
 describe("mermaid canvas frame", () => {
   test("MERMAID_CANVAS_HEIGHT is a positive fixed integer height", () => {
     expect(MERMAID_CANVAS_HEIGHT).toBeGreaterThan(0);
     expect(Number.isInteger(MERMAID_CANVAS_HEIGHT)).toBe(true);
+  });
+
+  // jsdom has no layout: give the viewport a size and run frames at once so
+  // the fit on first paint happens inside the test.
+  function withLayout(width: number, height: number) {
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    const size = (el: HTMLElement, value: number) =>
+      el.classList.contains("cm-mermaid-canvas-viewport") ? value : 0;
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(
+      function (this: HTMLElement) {
+        return size(this, width);
+      },
+    );
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(
+      function (this: HTMLElement) {
+        return size(this, height);
+      },
+    );
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test("shows an error as text, never as markup", () => {
+    const host = document.createElement("div");
+    mountMermaidCanvas(host, {
+      diagram: { error: 'Parse error: <img src=x onerror="alert(1)">' },
+      ariaLabel: "Mermaid diagram",
+    });
+    const error = host.querySelector(".cm-mermaid-canvas-error");
+    expect(error?.getAttribute("role")).toBe("alert");
+    expect(host.querySelector("img")).toBeNull();
+    expect(host.querySelector(".cm-mermaid-canvas-error-msg")?.textContent).toBe(
+      'Parse error: <img src=x onerror="alert(1)">',
+    );
+  });
+
+  test("mounts the SVG and labels it", () => {
+    const host = document.createElement("div");
+    mountMermaidCanvas(host, { diagram: renderMermaid(DIAGRAMS.pie), ariaLabel: "Mermaid: pie" });
+    const svg = host.querySelector(".cm-mermaid-canvas-stage svg");
+    expect(svg?.classList.contains("pele-pie")).toBe(true);
+    expect(svg?.getAttribute("aria-label")).toBe("Mermaid: pie");
+    expect(host.querySelector(".cm-mermaid-canvas-error")).toBeNull();
+  });
+
+  test("keeps a diagram's own accessible title", () => {
+    const host = document.createElement("div");
+    const diagram = renderMermaid("flowchart LR\n  accTitle: Pipeline\n  A --> B");
+    mountMermaidCanvas(host, { diagram, ariaLabel: "Mermaid: flowchart" });
+    const svg = host.querySelector("svg")!;
+    expect(svg.hasAttribute("aria-label")).toBe(false);
+    expect(svg.getAttribute("aria-labelledby")).toMatch(/title/);
+  });
+
+  test("switches between an error and a diagram as the source is fixed", () => {
+    const host = document.createElement("div");
+    const handle = mountMermaidCanvas(host, {
+      diagram: renderMermaid("flowchart TD\n  A -->"),
+      ariaLabel: "Mermaid diagram",
+    });
+    expect(host.querySelector(".cm-mermaid-canvas-error")).not.toBeNull();
+    handle.updateSource(renderMermaid(DIAGRAMS.flowchart), DIAGRAMS.flowchart);
+    expect(host.querySelector(".cm-mermaid-canvas-error")).toBeNull();
+    expect(host.querySelector("svg.pele")).not.toBeNull();
+    handle.destroy();
+  });
+
+  test("fits a diagram too big for the minimum zoom entirely into view", () => {
+    withLayout(640, 480);
+    const host = document.createElement("div");
+    // 0.1 is well below the canvas's minimum zoom (0.25).
+    const diagram = { svg: '<svg class="pele"></svg>', width: 4000, height: 4000 };
+    mountMermaidCanvas(host, { diagram, ariaLabel: "big" });
+    const svg = host.querySelector<SVGSVGElement>("svg")!;
+    const shown = parseFloat(svg.style.height);
+    expect(shown).toBeLessThanOrEqual(480);
+    expect(shown).toBeCloseTo(480 - 32);
+  });
+
+  test("scales a small diagram up to fill the frame", () => {
+    withLayout(640, 480);
+    const host = document.createElement("div");
+    const diagram = { svg: '<svg class="pele"></svg>', width: 200, height: 100 };
+    mountMermaidCanvas(host, { diagram, ariaLabel: "small" });
+    const svg = host.querySelector<SVGSVGElement>("svg")!;
+    expect(parseFloat(svg.style.width)).toBeCloseTo(640 - 32);
   });
 });
 

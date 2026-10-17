@@ -54,19 +54,17 @@ class MermaidWidget extends WidgetType {
     const onExpand = () => openMermaidFullscreen(this.body, ariaLabel);
     const onSourceChange = (next: string) => writeFenceText(view, host, next);
 
-    // Synchronous render. beautiful-mermaid is sync and the SVG cache makes
-    // repeat calls O(map lookup), so the wrapper paints with its final SVG in
-    // the same frame it enters the DOM — no IntersectionObserver, no async
-    // gap that can leave the user stuck on a placeholder.
-    const result = renderMermaid(this.body);
+    // Synchronous render. Pele is sync and the SVG cache makes repeat calls
+    // O(map lookup), so the wrapper paints with its final SVG in the same
+    // frame it enters the DOM — no IntersectionObserver, no async gap that
+    // can leave the user stuck on a placeholder.
     const handle = mountMermaidCanvas(host, {
-      svgHtml: result.svg ?? "",
+      diagram: renderMermaid(this.body),
       ariaLabel,
       source: this.fenceText,
       onSourceChange,
       onExpand,
     });
-    if (result.error) handle.updateSource("", this.fenceText, result.error);
     widgetHandles.set(wrapper, handle);
 
     return wrapper;
@@ -78,8 +76,7 @@ class MermaidWidget extends WidgetType {
   updateDOM(dom: HTMLElement, _view: EditorView): boolean {
     const handle = widgetHandles.get(dom);
     if (!handle) return false;
-    const result = renderMermaid(this.body);
-    handle.updateSource(result.svg ?? "", this.fenceText, result.error);
+    handle.updateSource(renderMermaid(this.body), this.fenceText);
     return true;
   }
 

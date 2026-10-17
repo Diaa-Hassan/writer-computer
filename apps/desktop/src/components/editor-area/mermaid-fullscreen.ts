@@ -9,8 +9,8 @@ import { mountMermaidCanvas } from "./mermaid-canvas";
 import { renderMermaid } from "./mermaid-renderer";
 
 export function openMermaidFullscreen(source: string, ariaLabel: string): void {
-  const result = renderMermaid(source);
-  if (!result.svg) return;
+  // An invalid diagram opens too and shows the same error as the inline frame.
+  const diagram = renderMermaid(source);
 
   const overlay = document.createElement("div");
   overlay.className = "cm-mermaid-fullscreen";
@@ -72,7 +72,7 @@ export function openMermaidFullscreen(source: string, ariaLabel: string): void {
   });
 
   mountMermaidCanvas(host, {
-    svgHtml: result.svg,
+    diagram,
     ariaLabel,
     onClose: close,
   });

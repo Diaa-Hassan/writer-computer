@@ -7,7 +7,47 @@
   padding: 8px 0;
 }
 
+/* Pele theme. Pele colours every diagram from these variables when it
+   paints (its SVG reads them as `var(--pele-*)`), so switching between light
+   and dark, or changing the accent or the Contrast setting, recolours the
+   diagrams on screen without re-rendering them. Both themes share one
+   mapping because it is built from the theme's own primaries (`--fg-base`,
+   `--bg-base`, `--accent`, `--contrast`), which `[data-theme]` already swaps.
+   Every colour is an opaque mix of the two base colours: the app's overlay
+   tokens are translucent, and translucent fills would double up where Pele
+   stacks shapes (a node on a subgraph, a label box on an edge).
+   `--pele-font` stays unset on purpose: see `diagramFonts` in
+   mermaid-renderer.ts. Set on the canvas so the inline frame and the
+   fullscreen overlay (which also has this class) both get it. */
 .cm-mermaid-canvas {
+  /* Label boxes on edges and the inside of hollow shapes use the page
+     background; the frame itself stays transparent. */
+  --pele-bg: var(--bg-base);
+  --pele-fg: var(--fg-base);
+  --pele-muted: color-mix(in srgb, var(--fg-base) 62%, var(--bg-base));
+  --pele-line: color-mix(in srgb, var(--fg-base) 58%, var(--bg-base));
+  --pele-surface: color-mix(in srgb, var(--fg-base) calc(var(--contrast) * 14%), var(--bg-base));
+  --pele-surface-alt: color-mix(
+    in srgb,
+    var(--fg-base) calc(var(--contrast) * 26%),
+    var(--bg-base)
+  );
+  --pele-border: color-mix(in srgb, var(--fg-base) calc(var(--contrast) * 75%), var(--bg-base));
+  --pele-accent: var(--accent);
+  --pele-critical: color-mix(in srgb, #e5484d 85%, var(--fg-base));
+  /* Categorical colours (pie slices, git branches, mindmap branches, …),
+     led by the accent. Mixing each with `--fg-base` darkens it on the light
+     theme and lightens it on the dark one, which is what keeps Pele's text
+     on these fills (drawn in `--pele-bg`) readable in both. */
+  --pele-series-1: color-mix(in srgb, var(--accent) 88%, var(--fg-base));
+  --pele-series-2: color-mix(in srgb, #4c78a8 85%, var(--fg-base));
+  --pele-series-3: color-mix(in srgb, #54a24b 85%, var(--fg-base));
+  --pele-series-4: color-mix(in srgb, #b279a2 85%, var(--fg-base));
+  --pele-series-5: color-mix(in srgb, #d4a72c 85%, var(--fg-base));
+  --pele-series-6: color-mix(in srgb, #4fa3a0 85%, var(--fg-base));
+  --pele-series-7: color-mix(in srgb, #e45756 85%, var(--fg-base));
+  --pele-series-8: color-mix(in srgb, #9d755d 85%, var(--fg-base));
+
   position: relative;
   height: 480px;
   border: 1px solid var(--border-color);
@@ -135,20 +175,13 @@
   max-width: none;
 }
 
-/* xychart series palette: keep all series close to the accent in hue and
-   lightness instead of the default rainbow shifts. beautiful-mermaid scopes
-   its own `--xychart-color-N` defaults to `svg { … }` (specificity 0,0,0,1);
-   this rule is 0,0,2,1 so it wins, and the derived `--xychart-bar-fill-N`
-   expressions (which read `--xychart-color-N` via color-mix) follow along
-   for free. */
-.cm-mermaid-canvas-stage svg[data-xychart-colors] {
-  --xychart-color-1: color-mix(in srgb, var(--accent) 45%, var(--fg-base) 55%);
-  --xychart-color-2: color-mix(in srgb, var(--accent) 20%, var(--fg-base) 80%);
-  --xychart-color-3: color-mix(in srgb, var(--accent) 8%, var(--fg-base) 92%);
-  --xychart-color-4: color-mix(in srgb, var(--accent) 4%, var(--fg-base) 96%);
-  --xychart-color-5: color-mix(in srgb, var(--accent) 2%, var(--fg-base) 98%);
-  --xychart-color-6: var(--fg-base);
-  --xychart-color-7: var(--fg-base);
+/* XY charts stay in the accent's hue rather than the categorical palette:
+   a bar and a line over the same months read as one family. */
+.cm-mermaid-canvas-stage svg.pele-xychart {
+  --pele-series-1: var(--accent);
+  --pele-series-2: color-mix(in srgb, var(--accent) 45%, var(--fg-base));
+  --pele-series-3: color-mix(in srgb, var(--accent) 20%, var(--fg-base));
+  --pele-series-4: color-mix(in srgb, var(--accent) 8%, var(--fg-base));
 }
 
 .cm-mermaid-canvas-edit,
@@ -247,18 +280,35 @@
 
 /* Render errors inside the canvas stage so the surrounding frame + zoom
    controls + (when open) the inline editor panel stay mounted. The user
-   can then fix the source in-place. */
-.cm-mermaid-canvas-error-msg {
+   can then fix the source in-place. Pele's syntax errors quote the line and
+   point at the column with `^`, so the message keeps its line breaks and
+   alignment in the code font. */
+.cm-mermaid-canvas-error {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 10px;
   padding: 1.5em 2em;
-  color: var(--text-error, #ff6b6b);
+  overflow: auto;
+}
+
+.cm-mermaid-canvas-error-title {
+  color: var(--pele-critical);
+  font-family: var(--ui-font);
+  font-size: 0.9em;
+  font-weight: 600;
+}
+
+.cm-mermaid-canvas-error-msg {
+  margin: 0;
+  max-width: 100%;
+  color: var(--text-secondary);
   font-family: var(--pm-code-font, var(--mono-font, "SF Mono", Menlo, Monaco, Consolas, monospace));
-  font-size: 0.85em;
-  text-align: center;
+  font-size: 0.8em;
+  line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }

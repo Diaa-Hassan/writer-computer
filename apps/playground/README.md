@@ -21,6 +21,11 @@ wiki links, search, clipboard) instead of the core subset. Tauri calls are
 stubbed to fail, so local images show as broken and link opening / the native
 clipboard menu do nothing; editing and rendering behave as in the app.
 
+Add `dark` (`?full&dark`) for the app's dark theme tokens. The theme can also
+be flipped live with `document.documentElement.dataset.theme = "light"` (or
+`"dark"`), which is how Mermaid diagrams are checked to recolour without a
+re-render.
+
 The editor view is on `window.__view` for scripted checks
 (`agent-browser eval "window.__view.state.doc.toString()"`), and the
 `EditorView` class on `window.__EditorView`, so a script can read facets

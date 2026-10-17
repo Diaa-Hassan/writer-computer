@@ -21,6 +21,12 @@ import "@/components/editor-area/prosemark-theme.css";
 // image file URLs) fail when triggered, but editing and rendering work.
 const FULL = new URLSearchParams(location.search).has("full");
 
+// `?dark` renders with the app's dark theme tokens. Flip it live with
+// `document.documentElement.dataset.theme = "light" | "dark"`.
+document.documentElement.dataset.theme = new URLSearchParams(location.search).has("dark")
+  ? "dark"
+  : "light";
+
 // Image and wiki-embed widgets call Tauri's `convertFileSrc` while rendering;
 // without a stand-in the throw leaves CodeMirror's view tree broken. The
 // resulting asset:// URLs don't load, so local images show as broken.

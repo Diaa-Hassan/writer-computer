@@ -3,7 +3,14 @@
 // nested CodeMirror on the left of the same container; toggling the code icon
 // reveals the inline source editor while the rendered diagram stays in the
 // right half. The canvas frame is mounted by the CodeMirror MermaidWidget
-// once the SVG has been rendered.
+// with the result of `renderMermaid`: Pele's SVG (already sanitised) or the
+// error that explains why the source could not be drawn.
+//
+// Pele ships its own pan/zoom (`mount`, `enableZoom`). The canvas keeps its
+// own because `mount` re-lays the diagram out on every width change, which
+// would reshuffle it while the source panel opens, and the canvas fits small
+// diagrams up to fill a fixed-height frame that holds the edit and expand
+// controls as well.
 
 import { EditorState } from "@codemirror/state";
 import { EditorView, drawSelection, keymap } from "@codemirror/view";
@@ -11,8 +18,8 @@ import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { StreamLanguage } from "@codemirror/language";
 import { markdown } from "@codemirror/lang-markdown";
 import { GFM } from "@lezer/markdown";
-import DOMPurify from "dompurify";
 import { baseSyntaxHighlights, generalSyntaxHighlights } from "@/lib/prosemark-core/main";
+import type { RenderError, RenderResult } from "./mermaid-renderer";
 
 export const MERMAID_CANVAS_HEIGHT = 480;
 
@@ -35,7 +42,7 @@ const CODE_ICON_PATHS = ["m16 18 6-6-6-6", "m8 6-6 6 6 6", "m13 4-2 16"] as cons
 const RESET_ICON_PATHS = ["M3 12a9 9 0 1 0 2.64-6.36L3 8", "M3 3v5h5"] as const;
 
 export type MermaidCanvasOptions = {
-  svgHtml: string;
+  diagram: RenderResult | RenderError;
   ariaLabel: string;
   // Pass `source` + `onSourceChange` together to enable the Edit-code toggle
   // and the inline source editor. Omit both in fullscreen mode (read-only).
@@ -48,10 +55,9 @@ export type MermaidCanvasOptions = {
 };
 
 export type MermaidCanvasHandle = {
-  // Replace the rendered SVG when the source has changed. Re-fits the new
-  // diagram into the viewport. Idempotent — calling with the same source is
-  // a no-op.
-  updateSource(svgHtml: string, sourceText: string, error?: string): void;
+  // Replace the rendered diagram (or error) when the source has changed and
+  // re-fit it into the viewport.
+  updateSource(diagram: RenderResult | RenderError, sourceText: string): void;
   destroy(): void;
 };
 
@@ -76,15 +82,6 @@ export function mountMermaidCanvas(
 
   const stage = document.createElement("div");
   stage.className = "cm-mermaid-canvas-stage";
-  stage.innerHTML = sanitizeSvgHtml(opts.svgHtml);
-  // Hide the stage until the first fit. `toDOM` runs before the wrapper is in
-  // the document, so `viewport.clientWidth` is 0 — we can't compute the
-  // centered transform synchronously. Without this the user briefly sees the
-  // diagram at top-left before it snaps to centered on the next frame.
-  stage.style.opacity = "0";
-
-  let svg = stage.querySelector("svg") as SVGSVGElement | null;
-  decorateSvg(svg, opts.ariaLabel);
 
   viewport.append(stage);
   if (editingEnabled) host.append(editorPanel);
@@ -188,27 +185,11 @@ export function mountMermaidCanvas(
   host.append(topCluster, zoomCluster);
 
   const state = { zoom: 1, panX: 0, panY: 0 };
-  // Natural (unzoomed) SVG dimensions in pixels. Mermaid always emits a
-  // `viewBox` so we use that as the canonical source — it's robust against
-  // mermaid's `width="100%"` attribute and against the fact that we strip
-  // the inline style.
+  // The diagram on the stage and its natural (unzoomed) size in pixels, as
+  // Pele measured it. Null / 0 while the stage shows an error.
+  let svg: SVGSVGElement | null = null;
   let naturalW = 0;
   let naturalH = 0;
-
-  function measureNatural(): void {
-    if (!svg || naturalW > 0) return;
-    const vb = svg.viewBox.baseVal;
-    if (vb && vb.width > 0 && vb.height > 0) {
-      naturalW = vb.width;
-      naturalH = vb.height;
-      return;
-    }
-    const rect = svg.getBoundingClientRect();
-    if (rect.width > 0 && rect.height > 0) {
-      naturalW = rect.width;
-      naturalH = rect.height;
-    }
-  }
 
   function applyTransform(): void {
     if (svg && naturalW > 0) {
@@ -218,12 +199,16 @@ export function mountMermaidCanvas(
     stage.style.transform = `translate(${state.panX}px, ${state.panY}px)`;
   }
 
+  // The fit zoom of the current diagram. Zooming out stops at ZOOM_MIN, or
+  // at the fit for a diagram too big to fit at ZOOM_MIN, so the whole
+  // diagram can always be brought back into view.
+  let fitZoom = 1;
+
   function clampZoom(z: number): number {
-    return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+    return Math.max(Math.min(ZOOM_MIN, fitZoom), Math.min(ZOOM_MAX, z));
   }
 
   function fitToViewport(): void {
-    measureNatural();
     const vw = viewport.clientWidth;
     const vh = viewport.clientHeight;
     if (naturalW <= 0 || naturalH <= 0 || vw <= 0 || vh <= 0) {
@@ -232,16 +217,15 @@ export function mountMermaidCanvas(
     }
     // Fit to fill: scale so the diagram fills one axis with FIT_MARGIN_PX
     // breathing room. Small diagrams scale up (capped at ZOOM_MAX), large
-    // diagrams scale down (capped at ZOOM_MIN).
-    const fit = Math.min((vw - FIT_MARGIN_PX * 2) / naturalW, (vh - FIT_MARGIN_PX * 2) / naturalH);
-    state.zoom = clampZoom(fit);
+    // diagrams scale down as far as it takes to show all of them.
+    fitZoom = Math.min((vw - FIT_MARGIN_PX * 2) / naturalW, (vh - FIT_MARGIN_PX * 2) / naturalH);
+    state.zoom = clampZoom(fitZoom);
     state.panX = (vw - naturalW * state.zoom) / 2;
     state.panY = (vh - naturalH * state.zoom) / 2;
     applyTransform();
   }
 
   function zoomAt(clientX: number, clientY: number, factor: number): void {
-    measureNatural();
     const rect = viewport.getBoundingClientRect();
     const localX = clientX - rect.left;
     const localY = clientY - rect.top;
@@ -382,16 +366,8 @@ export function mountMermaidCanvas(
     }
   });
 
-  // First paint: fit the diagram once the layout has settled. Wait one frame
-  // so the wrapper has its final width inside CodeMirror's content layout,
-  // then reveal the stage.
-  requestAnimationFrame(() => {
-    fitToViewport();
-    stage.style.opacity = "1";
-  });
-
   function showError(message: string): void {
-    stage.innerHTML = "";
+    stage.replaceChildren();
     stage.style.transform = "none";
     stage.style.opacity = "1";
     stage.style.width = "100%";
@@ -399,16 +375,51 @@ export function mountMermaidCanvas(
     state.zoom = 1;
     state.panX = 0;
     state.panY = 0;
-    const errEl = document.createElement("div");
-    errEl.className = "cm-mermaid-canvas-error-msg";
-    errEl.textContent = `Diagram error: ${message}`;
-    stage.append(errEl);
     svg = null;
     naturalW = 0;
     naturalH = 0;
+    // `textContent` only: Pele's messages quote the diagram source.
+    const errEl = document.createElement("div");
+    errEl.className = "cm-mermaid-canvas-error";
+    errEl.setAttribute("role", "alert");
+    const title = document.createElement("div");
+    title.className = "cm-mermaid-canvas-error-title";
+    title.textContent = "Can’t draw this diagram";
+    const detail = document.createElement("pre");
+    detail.className = "cm-mermaid-canvas-error-msg";
+    detail.textContent = message;
+    errEl.append(title, detail);
+    stage.append(errEl);
   }
 
-  function updateSource(svgHtml: string, sourceText: string, error?: string): void {
+  function showDiagram(diagram: RenderResult): void {
+    stage.style.width = "";
+    stage.style.height = "";
+    // Hide the stage until the first fit. `toDOM` runs before the wrapper is
+    // in the document, so `viewport.clientWidth` is 0 — we can't compute the
+    // centered transform synchronously. Without this the user briefly sees
+    // the diagram at top-left before it snaps to centered on the next frame.
+    stage.style.opacity = "0";
+    // `renderMermaid` sanitised this markup before caching it.
+    stage.innerHTML = diagram.svg;
+    svg = stage.querySelector("svg");
+    decorateSvg(svg, opts.ariaLabel);
+    naturalW = diagram.width;
+    naturalH = diagram.height;
+    // Fit once the layout has settled: wait one frame so the wrapper has its
+    // final width inside CodeMirror's content layout, then reveal the stage.
+    requestAnimationFrame(() => {
+      fitToViewport();
+      stage.style.opacity = "1";
+    });
+  }
+
+  function show(diagram: RenderResult | RenderError): void {
+    if (diagram.error !== undefined) showError(diagram.error);
+    else showDiagram(diagram);
+  }
+
+  function updateSource(diagram: RenderResult | RenderError, sourceText: string): void {
     // Always sync inner editor if source diverges (handles external doc
     // edits — undo, multi-cursor edits, collaborators, etc.). When the
     // change originated *here* from the inline editor, the strings already
@@ -425,25 +436,10 @@ export function mountMermaidCanvas(
       });
     }
     currentSource = sourceText;
-
-    if (error) {
-      showError(error);
-      return;
-    }
-
-    // Re-render: replace stage's SVG, reset measurement cache, refit.
-    stage.style.width = "";
-    stage.style.height = "";
-    stage.innerHTML = sanitizeSvgHtml(svgHtml);
-    svg = stage.querySelector("svg") as SVGSVGElement | null;
-    decorateSvg(svg, opts.ariaLabel);
-    naturalW = 0;
-    naturalH = 0;
-    requestAnimationFrame(() => {
-      fitToViewport();
-      stage.style.opacity = "1";
-    });
+    show(diagram);
   }
+
+  show(opts.diagram);
 
   function destroy(): void {
     if (sourceChangeTimer) {
@@ -457,25 +453,14 @@ export function mountMermaidCanvas(
   return { updateSource, destroy };
 }
 
-// Sanitize the rendered SVG right at the `innerHTML` sink. The renderer
-// (`mermaid-renderer.ts`) already strips scripts/on*= handlers, but documents
-// come from external sources (vaults, repos) and the value flows straight to
-// `innerHTML`, so we keep a DOMPurify pass at the trust boundary. The SVG
-// profile preserves the `<style>` block, the root `style` attribute (CSS
-// custom properties for theming), and `viewBox` that `measureNatural` reads.
-function sanitizeSvgHtml(svgHtml: string): string {
-  return DOMPurify.sanitize(svgHtml, { USE_PROFILES: { svg: true, svgFilters: true } });
-}
-
 function decorateSvg(svg: SVGSVGElement | null, ariaLabel: string): void {
   if (!svg) return;
-  // Keep the SVG's existing `style` attribute — beautiful-mermaid uses it
-  // to declare the CSS custom properties (--bg, --fg, --_line, …) that the
-  // inner <style> block references for every fill/stroke. Stripping it
-  // collapses all the theming. Width/height for zoom are set via individual
-  // style properties below, which merge with whatever's already there.
-  svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", ariaLabel);
+  // Keep the SVG's own `style` attribute: Pele declares its colours there as
+  // `var(--pele-*)` lookups, which is what lets the theme recolour a diagram
+  // without re-rendering it. Zoom sets width/height as individual style
+  // properties, which merge with it. A diagram's `accTitle` already labels
+  // it (`aria-labelledby`); the first source line labels the rest.
+  if (!svg.hasAttribute("aria-labelledby")) svg.setAttribute("aria-label", ariaLabel);
 }
 
 function setCodeButtonIcon(button: HTMLButtonElement): void {
@@ -534,6 +519,31 @@ const MERMAID_KEYWORDS = new Set<string>([
   "sankey",
   "block-beta",
   "block",
+  // Further diagram types Pele renders (pele.run/compatibility).
+  "architecture-beta",
+  "kanban",
+  "C4Context",
+  "C4Container",
+  "C4Component",
+  "C4Dynamic",
+  "C4Deployment",
+  "packet",
+  "packet-beta",
+  "radar-beta",
+  "treemap",
+  "treemap-beta",
+  "swimlane-beta",
+  "agentflow-beta",
+  "railroad-beta",
+  "treeView-beta",
+  "cynefin-beta",
+  "wardley-beta",
+  "eventmodeling",
+  "usecase-beta",
+  "venn-beta",
+  "ishikawa",
+  "ishikawa-beta",
+  "info",
   "TD",
   "TB",
   "BT",
