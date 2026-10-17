@@ -24,29 +24,32 @@
      background; the frame itself stays transparent. */
   --pele-bg: var(--bg-base);
   --pele-fg: var(--fg-base);
-  --pele-muted: color-mix(in srgb, var(--fg-base) 62%, var(--bg-base));
-  --pele-line: color-mix(in srgb, var(--fg-base) 58%, var(--bg-base));
-  --pele-surface: color-mix(in srgb, var(--fg-base) calc(var(--contrast) * 14%), var(--bg-base));
+  --pele-muted: color-mix(in srgb, var(--fg-base) 55%, var(--bg-base));
+  --pele-line: color-mix(in srgb, var(--fg-base) 45%, var(--bg-base));
+  --pele-surface: color-mix(in srgb, var(--fg-base) calc(var(--contrast) * 10%), var(--bg-base));
   --pele-surface-alt: color-mix(
     in srgb,
     var(--fg-base) calc(var(--contrast) * 26%),
     var(--bg-base)
   );
-  --pele-border: color-mix(in srgb, var(--fg-base) calc(var(--contrast) * 75%), var(--bg-base));
+  --pele-border: color-mix(in srgb, var(--fg-base) calc(var(--contrast) * 48%), var(--bg-base));
+  --pele-radius: 2px;
   --pele-accent: var(--accent);
   --pele-critical: color-mix(in srgb, #e5484d 85%, var(--fg-base));
-  /* Categorical colours (pie slices, git branches, mindmap branches, …),
-     led by the accent. Mixing each with `--fg-base` darkens it on the light
-     theme and lightens it on the dark one, which is what keeps Pele's text
-     on these fills (drawn in `--pele-bg`) readable in both. */
-  --pele-series-1: color-mix(in srgb, var(--accent) 88%, var(--fg-base));
-  --pele-series-2: color-mix(in srgb, #4c78a8 85%, var(--fg-base));
-  --pele-series-3: color-mix(in srgb, #54a24b 85%, var(--fg-base));
-  --pele-series-4: color-mix(in srgb, #b279a2 85%, var(--fg-base));
-  --pele-series-5: color-mix(in srgb, #d4a72c 85%, var(--fg-base));
-  --pele-series-6: color-mix(in srgb, #4fa3a0 85%, var(--fg-base));
-  --pele-series-7: color-mix(in srgb, #e45756 85%, var(--fg-base));
-  --pele-series-8: color-mix(in srgb, #9d755d 85%, var(--fg-base));
+  /* Categorical colours (pie slices, git branches, mindmap branches, …):
+     one hue, the accent, at falling strength. Each step mixes it toward
+     `--fg-base`, so it darkens on the light theme and lightens on the dark
+     one; that keeps Pele's text on these fills (drawn in `--pele-bg`)
+     readable in both. Neighbouring slices are told apart by lightness and
+     by the background-coloured edge Pele draws between them. */
+  --pele-series-1: var(--accent);
+  --pele-series-2: color-mix(in srgb, var(--accent) 72%, var(--fg-base));
+  --pele-series-3: color-mix(in srgb, var(--accent) 50%, var(--fg-base));
+  --pele-series-4: color-mix(in srgb, var(--accent) 35%, var(--fg-base));
+  --pele-series-5: color-mix(in srgb, var(--accent) 24%, var(--fg-base));
+  --pele-series-6: color-mix(in srgb, var(--accent) 16%, var(--fg-base));
+  --pele-series-7: color-mix(in srgb, var(--accent) 10%, var(--fg-base));
+  --pele-series-8: color-mix(in srgb, var(--accent) 6%, var(--fg-base));
 
   position: relative;
   height: 480px;
@@ -173,6 +176,44 @@
 .cm-mermaid-canvas-stage svg {
   display: block;
   max-width: none;
+}
+
+/* Writer's diagram look, carried over from the beautiful-mermaid renderer:
+   accent arrowheads, muted edge labels in bordered boxes, dashed sequence
+   lifelines, open subgraphs. Only paint changes: anything that alters the
+   width of text (weight, family, size) would break the layout Pele measured,
+   so labels keep Pele's font. */
+.cm-mermaid-canvas-stage .pele-marker[fill="var(--_l)"] {
+  fill: var(--pele-accent);
+}
+
+/* Hollow markers (inheritance triangles, open arrows) are drawn by stroke. */
+.cm-mermaid-canvas-stage :is(.pele-class, .pele-requirement) .pele-marker:not([fill]) {
+  stroke: var(--pele-accent);
+}
+
+.cm-mermaid-canvas-stage .pele-edge-label text {
+  fill: var(--pele-muted);
+}
+
+.cm-mermaid-canvas-stage .pele-flowchart .pele-edge-label rect {
+  stroke: var(--pele-border);
+}
+
+.cm-mermaid-canvas-stage .pele-lifeline {
+  stroke-dasharray: 6 4;
+}
+
+.cm-mermaid-canvas-stage .pele-flowchart .pele-cluster > rect {
+  fill: var(--pele-bg);
+  fill-opacity: 1;
+}
+
+.cm-mermaid-canvas-stage svg.pele-xychart .pele-grid {
+  stroke: var(--pele-border);
+  stroke-dasharray: 0 8;
+  stroke-linecap: round;
+  stroke-width: 2px;
 }
 
 /* XY charts stay in the accent's hue rather than the categorical palette, so

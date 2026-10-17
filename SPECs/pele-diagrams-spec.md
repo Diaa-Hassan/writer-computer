@@ -48,23 +48,30 @@ DOMPurify runs as its own instance, so hooks registered on the shared one (the H
 
 Set on `.cm-mermaid-canvas`, which both the inline frame and the fullscreen overlay carry. One mapping covers both themes because it is built from the primaries that `[data-theme]` swaps. Every colour is opaque (a mix of `--fg-base` into `--bg-base`): Pele stacks shapes (nodes on subgraphs, label boxes on edges) and the app's translucent overlay tokens would double up.
 
-| Pele variable        | Value                                                                                             | Used for                                                                                                            |
-| -------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `--pele-bg`          | `--bg-base`                                                                                       | edge-label boxes, hollow shapes, text on series colours                                                             |
-| `--pele-fg`          | `--fg-base`                                                                                       | text                                                                                                                |
-| `--pele-muted`       | fg 62%                                                                                            | secondary text                                                                                                      |
-| `--pele-line`        | fg 58%                                                                                            | edges, arrowheads                                                                                                   |
-| `--pele-surface`     | fg `contrast × 14%`                                                                               | node fill                                                                                                           |
-| `--pele-surface-alt` | fg `contrast × 26%`                                                                               | subgraph fill (drawn at 50% opacity)                                                                                |
-| `--pele-border`      | fg `contrast × 75%`                                                                               | node and subgraph borders                                                                                           |
-| `--pele-accent`      | `--accent`                                                                                        | highlights                                                                                                          |
-| `--pele-critical`    | red mixed 15% toward fg                                                                           | critical Gantt tasks; the error title                                                                               |
-| `--pele-series-1…8`  | accent, then blue, green, purple, yellow, teal, red, brown, each mixed 12–15% toward fg           | pie slices, branches, sections                                                                                      |
-| XY chart series      | bars: accent 28% into bg with an accent outline and 4px corners; line: accent mixed 25% toward fg | bars and lines stay in one hue (as before); Pele fills bars solid, and full-strength accent bars dominated the note |
+| Pele variable        | Value                                                                                             | Used for                                                                |
+| -------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `--pele-bg`          | `--bg-base`                                                                                       | edge-label boxes, hollow shapes, text on series colours                 |
+| `--pele-fg`          | `--fg-base`                                                                                       | text                                                                    |
+| `--pele-muted`       | fg 55%                                                                                            | secondary text, edge and message labels                                 |
+| `--pele-line`        | fg 45%                                                                                            | edges                                                                   |
+| `--pele-surface`     | fg `contrast × 10%`                                                                               | node fill                                                               |
+| `--pele-surface-alt` | fg `contrast × 26%`                                                                               | subgraph fill (drawn at 50% opacity) in diagrams other than flowcharts  |
+| `--pele-border`      | fg `contrast × 48%`                                                                               | node and subgraph borders                                               |
+| `--pele-accent`      | `--accent`                                                                                        | highlights, arrowheads (see below)                                      |
+| `--pele-critical`    | red mixed 15% toward fg                                                                           | critical Gantt tasks; the error title                                   |
+| `--pele-radius`      | 2px                                                                                               | rounded node corners                                                    |
+| `--pele-series-1…8`  | the accent at falling strength: 100%, 72%, 50%, 35%, 24%, 16%, 10%, 6%, mixed toward fg           | pie slices, branches, sections, radar curves                            |
+| XY chart series      | bars: accent 28% into bg with an accent outline and 4px corners; line: accent mixed 25% toward fg | Pele fills bars solid, and full-strength accent bars dominated the note |
 
-"fg N%" means `color-mix(in srgb, var(--fg-base) N%, var(--bg-base))`. `--contrast` is the Contrast setting (0.2–1.0), so node fills and borders follow it like the rest of the UI. Mixing the series colours toward `--fg-base` darkens them on the light theme and lightens them on the dark one, which keeps the `--pele-bg` text Pele draws on them readable in both.
+"fg N%" means `color-mix(in srgb, var(--fg-base) N%, var(--bg-base))`. `--contrast` is the Contrast setting (0.2–1.0), so node fills and borders follow it like the rest of the UI. The series steps mix the accent toward `--fg-base`, so they darken on the light theme and lighten on the dark one; that keeps the `--pele-bg` text Pele draws on them readable in both.
 
-Left at Pele's defaults: `--pele-font`, `--pele-font-mono` (see above), the weight variables, `--pele-radius`, `--pele-error` (only `mount()` uses it).
+#### Writer's diagram look
+
+Beyond the variables, the same file restyles a few of Pele's classes so diagrams keep the look Writer had with beautiful-mermaid: filled arrowheads (`.pele-marker[fill="var(--_l)"]`) and the hollow class/requirement markers in the accent, edge labels muted in bordered boxes, dashed sequence lifelines, flowchart subgraphs with an open (background) body, and a dotted XY chart grid. One colour, the accent, at different lightness levels for every categorical palette (pie, git graph, mindmap, timeline, Sankey, radar), as the XY chart already had.
+
+Only paint changes are allowed there. Pele sizes every box by measuring its label, so anything that changes the width of text (`font-weight`, `font-family`, `font-size`, `letter-spacing`) makes labels overflow. That rules out master's bold node labels and monospace class members. Master's XY chart legend and its orthogonal edge routing are content and layout, not style, so they stay as Pele draws them.
+
+Left at Pele's defaults: `--pele-font`, `--pele-font-mono` (see above), the weight variables, `--pele-error` (only `mount()` uses it).
 
 ### Canvas (`mermaid-canvas.ts`)
 
