@@ -187,9 +187,20 @@
   fill: var(--pele-accent);
 }
 
-/* Hollow markers (inheritance triangles, open arrows) are drawn by stroke. */
+/* Unfilled markers are drawn by stroke. Closed ones (inheritance triangles,
+   aggregation diamonds) stay hollow: in UML that is their meaning. Open
+   ones are a bare "V" (the requirement diagram's `satisfies` arrow); filling
+   the path closes it into a solid triangle like every other arrowhead. Only
+   in these two types: ER crow's feet and flowchart crosses are open paths
+   too, and must not be filled. */
 .cm-mermaid-canvas-stage :is(.pele-class, .pele-requirement) .pele-marker:not([fill]) {
   stroke: var(--pele-accent);
+}
+
+.cm-mermaid-canvas-stage
+  :is(.pele-class, .pele-requirement)
+  .pele-marker:not([fill]):not([d*="Z"]) {
+  fill: var(--pele-accent);
 }
 
 .cm-mermaid-canvas-stage .pele-edge-label text {
