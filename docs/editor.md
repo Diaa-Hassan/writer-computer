@@ -183,6 +183,19 @@ If your renderer is sync and cache-backed (or cheap to call), paint in `toDOM`. 
 
 Reference: `mermaid-decorations.ts` mounts the canvas synchronously in `toDOM`; the SVG cache is bounded LRU and the output is sanitised before reaching `innerHTML`.
 
+## Mermaid diagrams render through Pele
+
+`mermaid-renderer.ts` is the one place that calls [Pele](https://pele.run) (`render`, synchronous). It returns either a sanitised SVG with its natural size or an error message; the canvas, the widget and fullscreen only ever see that result. Rules:
+
+- **Theme in CSS, never in render options.** Pele writes every colour into the SVG as `var(--pele-*, default)`. `mermaid-canvas.css` maps those onto the theme primaries (`--fg-base`, `--bg-base`, `--accent`, `--contrast`) on `.cm-mermaid-canvas`, so a theme, accent or contrast change recolours diagrams on screen with no re-render and the cache key has no theme in it. Use opaque `color-mix(… var(--fg-base) N%, var(--bg-base))` values: Pele stacks shapes, and the app's translucent overlay tokens double up where they overlap. When Pele adds a colour variable, `tests/mermaid.test.ts` ("Pele theme mapping") fails until the CSS maps it.
+- **The font Pele measures is the font it paints.** Pele sizes nodes by measuring labels in `fontFamily` and writes that font into the SVG as the fallback of `var(--pele-font, …)`. Leave `--pele-font` unset; setting it in CSS paints labels in a font they weren’t measured in, so they can overflow or underfill their boxes. The renderer reads `--ui-font` / `--mono-font` from the root's inline style (where `applyCssVarBindings` puts them; `getComputedStyle` would force a style recalc on every `toDOM`) and keys the cache by them. After a font change, diagrams already on screen keep the old font until they re-render; accepted, since each one stays self-consistent.
+- **Restyle with paint only.** `mermaid-canvas.css` also overrides Pele's classes for Writer's diagram look (accent arrowheads, muted edge labels, dashed lifelines, accent series). Colours, strokes, dashes and fills are safe; never change `font-*` or `letter-spacing` on diagram text, since Pele laid the boxes out for the measured width.
+- **Fixed size, no adaptive layout.** `responsive: false` and no `maxWidth`: the canvas scales the SVG itself for fit and zoom, and a width-dependent layout would reshuffle the diagram when the source panel opens. That's also why the canvas keeps its own pan/zoom instead of Pele's `mount()` / `enableZoom()`.
+- **Links off.** A `click` link in the SVG would navigate the webview away from the app, so `links: false`.
+- **Bounded output.** Rendering is on the main thread, so `outputLimit` is 1M characters (Pele's default is 4M): a near-limit diagram would block the editor for most of a second and make each cache entry megabytes. Over-limit diagrams show Pele's limit error.
+- **Sanitise once, before caching, with a private DOMPurify instance** (hooks on the shared default instance, like the HTML block's `<a>` rewrite, must not apply). The SVG profile keeps everything Pele emits except `role` (it's in DOMPurify's HTML list), hence `ADD_ATTR: ["role"]`. The test suite checks the sanitiser leaves Pele's output for every diagram type unchanged; if it starts failing after a Pele bump, allow the new attribute rather than dropping the sanitiser.
+- **Errors are text.** `PeleError` messages quote the diagram source; display them with `textContent`. Anything else thrown is a renderer bug: it is logged and shown as "Unexpected error", never thrown out of `toDOM`. Errors are cached like SVGs, so an invalid diagram is parsed (and logged) once per source.
+
 ## Test the dispatch path, not just the helpers
 
 Pure-helper tests (`computeToggleSelection`-style) catch math bugs but not focus races, `posAtDOM` boundary errors, or cross-widget interference. The actual contract is "click does the right thing in CM," which only an integration test can verify.
@@ -210,6 +223,7 @@ A `transactionFilter` returning `[tr, { selection }]` adds a spec whose position
 ## File map
 
 - `mermaid-decorations.ts` — canonical replace-only block widget with in-widget editing. Reference for live position lookup (`findEnclosingFencedCode`) and writing the fence back from a nested editor.
+- `mermaid-renderer.ts` — `renderMermaid`, the one call into Pele: render options, DOMPurify, LRU cache, error messages. `mermaid-canvas.css` holds the `--pele-*` theme mapping.
 - `fold/image.ts` — canonical conditional replace ↔ widget, plus the measured-height cache for async-loading content.
 - `table-decorations.ts` — canonical conditional replace ↔ source-line styling; uses `selectAllDecorationsOnSelectExtension` for click-to-select.
 - `prosemark-core/codeFenceScroll.ts` — `codeBlockScrollField` / `setCodeBlockScroll` / `codeBlockAt`, the one place a code block's horizontal offset is stored and driven (wheel, caret reveal, resize clamp, drawn scrollbar thumb).

@@ -1,5 +1,6 @@
-/* The handful of app tokens the editor theme reads. Values mirror the light
-   defaults in apps/desktop/src/App.css; the rest of that file is chrome. */
+/* The handful of app tokens the editor theme and the Mermaid canvas read.
+   Values mirror the defaults in apps/desktop/src/App.css; the rest of that
+   file is chrome. */
 :root {
   --accent: #ff6a00;
   --bg-base: #ffffff;
@@ -18,8 +19,21 @@
   --blockquote-border: color-mix(in srgb, var(--fg-base) calc(var(--contrast) * 58%), transparent);
   --link-color: var(--accent);
   --editor-selection-bg: color-mix(in srgb, var(--accent) 30%, transparent);
+  --border-color: color-mix(in srgb, var(--fg-base) calc(var(--contrast) * 24%), transparent);
+  --surface-card: color-mix(in srgb, var(--fg-base) calc(var(--contrast) * 16%), transparent);
+  --surface-subtle: color-mix(in srgb, var(--fg-base) calc(var(--contrast) * 18%), transparent);
   --writer-editor-side-padding: 2rem;
   --writer-editor-outer-width: calc(640px + 2rem + 2rem);
+}
+
+/* `?dark`: the dark defaults from apps/desktop/src/App.css. */
+[data-theme="dark"] {
+  --bg-base: #111111;
+  --fg-base: #fcfcfc;
+}
+
+[data-theme="light"] {
+  --surface-card: transparent;
 }
 
 html,

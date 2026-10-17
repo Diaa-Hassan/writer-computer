@@ -32,11 +32,11 @@
     "@tauri-apps/plugin-dialog": "catalog:",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-store": "catalog:",
-    "beautiful-mermaid": "catalog:",
     "cmdk": "catalog:",
     "dompurify": "catalog:",
     "katex": "catalog:",
     "node-emoji": "catalog:",
+    "pele": "catalog:",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tailwindcss": "catalog:",
@@ -50,6 +50,7 @@
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
     "@welldone-software/why-did-you-render": "catalog:",
+    "jsdom": "catalog:",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
   }
