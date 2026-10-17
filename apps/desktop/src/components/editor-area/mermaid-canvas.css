@@ -175,13 +175,22 @@
   max-width: none;
 }
 
-/* XY charts stay in the accent's hue rather than the categorical palette:
-   a bar and a line over the same months read as one family. */
+/* XY charts stay in the accent's hue rather than the categorical palette, so
+   a bar and a line over the same months read as one family. Pele fills bars
+   solid; a full-strength accent block dominates the note, so bars are a tint
+   of the accent with an accent outline, and the line carries the strong
+   colour. */
 .cm-mermaid-canvas-stage svg.pele-xychart {
-  --pele-series-1: var(--accent);
-  --pele-series-2: color-mix(in srgb, var(--accent) 45%, var(--fg-base));
-  --pele-series-3: color-mix(in srgb, var(--accent) 20%, var(--fg-base));
-  --pele-series-4: color-mix(in srgb, var(--accent) 8%, var(--fg-base));
+  --pele-series-1: color-mix(in srgb, var(--accent) 28%, var(--bg-base));
+  --pele-series-2: color-mix(in srgb, var(--accent) 75%, var(--fg-base));
+  --pele-series-3: color-mix(in srgb, var(--accent) 45%, var(--fg-base));
+  --pele-series-4: color-mix(in srgb, var(--accent) 20%, var(--fg-base));
+}
+
+.cm-mermaid-canvas-stage svg.pele-xychart .pele-bars rect {
+  stroke: var(--accent);
+  stroke-width: 1.5px;
+  rx: 4px;
 }
 
 .cm-mermaid-canvas-edit,
