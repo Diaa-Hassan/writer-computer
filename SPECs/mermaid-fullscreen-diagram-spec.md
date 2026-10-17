@@ -43,7 +43,8 @@ without leaving the document.
 ## Implementation Notes
 
 - New module `mermaid-fullscreen.ts` exports `openMermaidFullscreen(source,
-ariaLabel)`. It renders the SVG via `renderMermaid` (cached), creates a
+ariaLabel)`. It renders the SVG via `renderMermaid` (cached; an invalid
+  diagram opens on the same error the inline frame shows), creates a
   `<div class="cm-mermaid-fullscreen">` with `role="dialog"` and
   `aria-modal="true"`, mounts a fresh canvas host inside it via
   `mountMermaidCanvas`, appends the overlay to `document.body`, and
