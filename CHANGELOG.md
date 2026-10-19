@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-19
+
+- Run bash code blocks. A ` ```bash ` block now has a Run button under it: click it to run the code in the note's folder and see its output (stdout, and stderr in red) appear under the block as it prints, then whether it finished or failed and with what exit code. Stop ends a run that is taking too long, including anything it started. Nothing runs unless you click Run, and output is never written into the note.
+
 ## 2026-10-17
 
 - Draw every kind of Mermaid diagram. Diagrams now render with [Pele](https://pele.run) instead of beautiful-mermaid, which only drew flowcharts, sequence, class, state, entity-relationship and XY charts and showed "Invalid mermaid header" for the rest. Gantt charts, pie charts, user journeys, git graphs, mindmaps, timelines, quadrant charts, Sankey, block, architecture, kanban, requirement, C4, packet, radar and treemap diagrams (every type built into Mermaid 12.1) now draw in the same canvas, with the same pan, zoom, fullscreen and Edit code panel. Layouts differ from before: Pele places nodes and routes edges its own way.

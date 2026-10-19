@@ -508,6 +508,7 @@ pub fn run() {
 
     builder
         .manage(AppState::new())
+        .manage(std::sync::Arc::new(commands::run::RunRegistry::default()))
         .setup(|app| {
             // Initialize the main window's per-window state (settings layer,
             // pending-open queue). `get_or_create` lazily builds the
@@ -610,6 +611,8 @@ pub fn run() {
             commands::settings::get_setting,
             commands::settings::set_setting,
             commands::settings::reset_setting,
+            commands::run::run_code,
+            commands::run::cancel_run,
             telemetry::telemetry_should_prompt,
             telemetry::telemetry_mark_prompted,
             telemetry::telemetry_report_declined,

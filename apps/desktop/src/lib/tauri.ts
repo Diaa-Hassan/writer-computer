@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import sidebarEntryKinds from "@shared/sidebar-entry-kinds.json";
@@ -302,4 +302,26 @@ export function saveClipboardImage(
   format: string,
 ): Promise<{ relative_path: string; absolute_path: string }> {
   return invoke("save_clipboard_image", { markdownFilePath, imageData, format });
+}
+
+// Code runs (```bash fences). Output streams over `onEvent` until an `exit`.
+export type RunEvent =
+  | { event: "stdout"; data: string }
+  | { event: "stderr"; data: string }
+  | { event: "exit"; data: { code: number | null; cancelled: boolean; truncated: boolean } };
+
+export function runCode(
+  runId: string,
+  lang: string,
+  code: string,
+  cwd: string | null,
+  onEvent: (event: RunEvent) => void,
+): Promise<void> {
+  const channel = new Channel<RunEvent>();
+  channel.onmessage = onEvent;
+  return invoke("run_code", { runId, lang, code, cwd, onEvent: channel });
+}
+
+export function cancelRun(runId: string): Promise<void> {
+  return invoke("cancel_run", { runId });
 }

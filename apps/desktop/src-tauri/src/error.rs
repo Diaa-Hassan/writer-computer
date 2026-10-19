@@ -12,6 +12,8 @@ pub enum AppError {
     InvalidPath(String),
     #[error("No workspace is open")]
     NoWorkspace,
+    #[error("Unsupported: {0}")]
+    Unsupported(String),
 }
 
 impl Serialize for AppError {
