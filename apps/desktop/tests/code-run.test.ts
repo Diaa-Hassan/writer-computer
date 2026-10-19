@@ -178,7 +178,9 @@ describe("Run All", () => {
     });
   }
 
-  const settled = () => new Promise((resolve) => setTimeout(resolve, 20));
+  // Wait for conditions, not a fixed time: a loaded test runner can take
+  // longer than any sleep. `flush` lets a wrongly-continuing run show up.
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   test("finds every runnable fence in order", () => {
     expect(runnableFenceStarts(EditorState.create({ doc, extensions: [markdown()] }))).toHaveLength(
@@ -190,7 +192,13 @@ describe("Run All", () => {
     const ran = fakeRuns([0, 0, 1, 0]);
     const view = makeView();
     expect(runCodeBlocks(view, "all")).toBe(true);
-    await settled();
+    await vi.waitFor(() => expect(ran).toHaveLength(3));
+    await vi.waitFor(() =>
+      expect(view.dom.querySelectorAll(".cm-code-run-tray")[2]?.getAttribute("data-status")).toBe(
+        "failed",
+      ),
+    );
+    await flush();
     expect(ran).toEqual(["echo one", "print('skip me? no, I run')", "exit 1"]);
     view.destroy();
   });
@@ -199,7 +207,13 @@ describe("Run All", () => {
     const ran = fakeRuns([0, 0, 0, 0]);
     const view = makeView(doc.indexOf("exit 1"));
     expect(runCodeBlocks(view, "above")).toBe(true);
-    await settled();
+    await vi.waitFor(() => expect(ran).toHaveLength(2));
+    await vi.waitFor(() =>
+      expect(view.dom.querySelectorAll(".cm-code-run-tray")[1]?.getAttribute("data-status")).toBe(
+        "done",
+      ),
+    );
+    await flush();
     expect(ran).toEqual(["echo one", "print('skip me? no, I run')"]);
     view.destroy();
   });
@@ -290,7 +304,11 @@ describe("Trusted Folders", () => {
     });
   }
 
-  const settled = () => new Promise((resolve) => setTimeout(resolve, 20));
+  // Wait for conditions, not a fixed time: a loaded test runner can take
+  // longer than any sleep. `flush` lets a wrongly-continuing run show up.
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const trayStatus = (view: EditorView) =>
+    view.dom.querySelector<HTMLElement>(".cm-code-run-tray")?.dataset.status;
   const click = (view: EditorView, selector: string) =>
     view.dom.querySelector<HTMLButtonElement>(selector)!.click();
 
@@ -300,17 +318,16 @@ describe("Trusted Folders", () => {
     const view = makeView();
 
     runCodeBlocks(view, "all");
-    await settled();
+    await vi.waitFor(() => expect(trayStatus(view)).toBe("needs-trust"));
     expect(ran).toEqual([]);
     const tray = view.dom.querySelector<HTMLElement>(".cm-code-run-tray")!;
     expect(tray.dataset.status).toBe("needs-trust");
     expect(tray.querySelector(".cm-code-run-trust-folder")!.textContent).toBe(folder);
 
     click(view, ".cm-code-run-trust-allow");
-    await settled();
-    expect(setSetting).toHaveBeenCalledWith("code.trusted-folders", [folder], "global");
     // Run All carried on once the folder was allowed.
-    expect(ran).toEqual(["echo one", "echo two"]);
+    await vi.waitFor(() => expect(ran).toEqual(["echo one", "echo two"]));
+    expect(setSetting).toHaveBeenCalledWith("code.trusted-folders", [folder], "global");
     view.destroy();
   });
 
@@ -340,11 +357,10 @@ describe("Trusted Folders", () => {
     const view = makeView();
 
     runCodeBlocks(view, "all");
-    await settled();
+    await vi.waitFor(() => expect(trayStatus(view)).toBe("needs-trust"));
     click(view, ".cm-code-run-trust-allow");
-    await settled();
+    await vi.waitFor(() => expect(ran).toEqual(["echo one", "echo two"]));
     expect(setSetting).toHaveBeenCalledWith("code.trusted-folders", [folder], "global");
-    expect(ran).toEqual(["echo one", "echo two"]);
     view.destroy();
   });
 
@@ -354,9 +370,10 @@ describe("Trusted Folders", () => {
     const view = makeView();
 
     runCodeBlocks(view, "all");
-    await settled();
+    await vi.waitFor(() => expect(trayStatus(view)).toBe("needs-trust"));
     click(view, ".cm-code-run-trust-cancel");
-    await settled();
+    await vi.waitFor(() => expect(trayStatus(view)).toBe("stopped"));
+    await flush();
     expect(setSetting).not.toHaveBeenCalled();
     expect(ran).toEqual([]);
     expect(view.dom.querySelectorAll(".cm-code-run-tray")).toHaveLength(1);
