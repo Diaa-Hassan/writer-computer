@@ -20,9 +20,11 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{Manager, State};
 
+use crate::config::ConfigValue;
 use crate::error::AppError;
+use crate::state::AppState;
 
 /// Output past this many bytes (stdout + stderr) stops the run, so a runaway
 /// loop can't flood the webview.
@@ -177,6 +179,7 @@ pub enum RunEvent {
         code: Option<i32>,
         cancelled: bool,
         truncated: bool,
+        timed_out: bool,
     },
 }
 
@@ -328,6 +331,95 @@ fn kill_group(pid: u32) {
 #[cfg(not(unix))]
 fn kill_group(_pid: u32) {}
 
+// ---------------------------------------------------------------------------
+// Settings (all global-scope in the schema, so a workspace's own
+// `.writer/config` can't turn running on or point a language at its binary)
+// ---------------------------------------------------------------------------
+
+const ENABLED_KEY: &str = "code.run-enabled";
+const TIMEOUT_KEY: &str = "code.timeout-seconds";
+const INTERPRETERS_KEY: &str = "code.interpreters";
+
+struct RunSettings {
+    enabled: bool,
+    timeout: Option<Duration>,
+    interpreters: Vec<String>,
+}
+
+fn run_settings(app: &tauri::AppHandle, label: &str) -> Result<RunSettings, AppError> {
+    let state = app.state::<AppState>().get_or_create(label);
+    let guard = state.settings.read();
+    let settings = guard
+        .as_ref()
+        .ok_or_else(|| AppError::Io("Settings not initialized".into()))?;
+    let timeout = settings
+        .get(TIMEOUT_KEY)
+        .and_then(ConfigValue::as_f64)
+        .filter(|secs| secs.is_finite() && *secs > 0.0)
+        .map(Duration::from_secs_f64);
+    Ok(RunSettings {
+        enabled: settings
+            .get(ENABLED_KEY)
+            .and_then(ConfigValue::as_bool)
+            .unwrap_or(true),
+        timeout,
+        interpreters: match settings.get(INTERPRETERS_KEY) {
+            Some(ConfigValue::List(entries)) => entries.clone(),
+            _ => Vec::new(),
+        },
+    })
+}
+
+/// Fence language (or alias) → runtime id, from the shared contract.
+fn runtime_id_for(lang: &str) -> Option<&'static str> {
+    static LANGS: OnceLock<HashMap<String, String>> = OnceLock::new();
+    LANGS
+        .get_or_init(|| {
+            serde_json::from_str(include_str!("../../../shared/code-runtimes.json"))
+                .expect("shared/code-runtimes.json is valid")
+        })
+        .get(&lang.trim().to_ascii_lowercase())
+        .map(String::as_str)
+}
+
+/// The user's `language=path` override for `runtime`, if any: the program
+/// to run and which of the runtime's tools it is (matched by file name, so
+/// `typescript=/opt/deno` gets deno's arguments; otherwise the first tool's).
+fn interpreter_override(
+    entries: &[String],
+    runtime: &'static Runtime,
+) -> Option<Result<(&'static Tool, PathBuf), AppError>> {
+    entries.iter().find_map(|entry| {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return None;
+        }
+        let Some((lang, path)) = entry.split_once('=') else {
+            return Some(Err(AppError::Message(format!(
+                "Interpreter setting `{entry}` should look like language=/path/to/program"
+            ))));
+        };
+        if runtime_id_for(lang) != Some(runtime.id) {
+            return None;
+        }
+        let path = PathBuf::from(path.trim());
+        if !path.is_absolute() || !path.is_file() {
+            return Some(Err(AppError::Message(format!(
+                "The {} interpreter in Settings doesn't exist: {}",
+                runtime.label,
+                path.display()
+            ))));
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let tool = runtime
+            .tools
+            .iter()
+            .find(|tool| tool.program == name)
+            .unwrap_or(&runtime.tools[0]);
+        Some(Ok((tool, path)))
+    })
+}
+
 /// Writes the block to `main.<ext>` in a temp dir named after the run.
 fn write_source(run_id: &str, ext: &str, code: &str) -> Result<(PathBuf, PathBuf), AppError> {
     // The id names a directory, so it must not be able to climb out of it.
@@ -348,7 +440,10 @@ fn write_source(run_id: &str, ext: &str, code: &str) -> Result<(PathBuf, PathBuf
 // `async` keeps it off the main thread: the first run waits for the login
 // shell's PATH.
 #[tauri::command(async)]
+#[allow(clippy::too_many_arguments)]
 pub fn run_code(
+    webview: tauri::Webview,
+    app: tauri::AppHandle,
     run_id: String,
     lang: String,
     code: String,
@@ -356,10 +451,19 @@ pub fn run_code(
     on_event: Channel<RunEvent>,
     registry: State<'_, Arc<RunRegistry>>,
 ) -> Result<(), AppError> {
+    let settings = run_settings(&app, webview.label())?;
+    if !settings.enabled {
+        return Err(AppError::Message(
+            "Running code is turned off in Settings (Code → Run Code Blocks)".into(),
+        ));
+    }
     let runtime =
         runtime(&lang).ok_or_else(|| AppError::Unsupported(format!("no runtime for `{lang}`")))?;
     let path = user_path();
-    let (tool, program_path) = resolve_tool(runtime, path)?;
+    let (tool, program_path) = match interpreter_override(&settings.interpreters, runtime) {
+        Some(found) => found?,
+        None => resolve_tool(runtime, path)?,
+    };
     let program = tool.program;
     let temp_dir = match tool.source {
         Source::Inline => None,
@@ -465,18 +569,33 @@ pub fn run_code(
     })
     .collect();
 
+    // Time limit: a watchdog that kills the group unless the run ends first.
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    if let Some(limit) = settings.timeout {
+        let timed_out = timed_out.clone();
+        std::thread::spawn(move || {
+            if done_rx.recv_timeout(limit) == Err(mpsc::RecvTimeoutError::Timeout) {
+                timed_out.store(true, Ordering::Relaxed);
+                kill_group(pid);
+            }
+        });
+    }
+
     let registry = registry.inner().clone();
     std::thread::spawn(move || {
         for reader in readers {
             let _ = reader.join();
         }
         let code = child.wait().ok().and_then(|status| status.code());
+        let _ = done_tx.send(());
         registry.0.lock().remove(&run_id);
         cleanup(temp_dir);
         let _ = on_event.send(RunEvent::Exit {
             code,
             cancelled: cancelled.load(Ordering::Relaxed),
             truncated: truncated.load(Ordering::Relaxed),
+            timed_out: timed_out.load(Ordering::Relaxed),
         });
     });
 
@@ -548,6 +667,61 @@ mod tests {
         let (tool, found) = resolve_tool(ts, &path).unwrap();
         assert_eq!(tool.program, "deno");
         assert_eq!(found, dir.path().join("deno"));
+    }
+
+    #[test]
+    fn run_settings_cannot_come_from_a_workspace() {
+        // A workspace's `.writer/config` lives inside the folder; if any of
+        // these were workspace-scoped, opening a cloned repo could enable
+        // running or swap in its own interpreter.
+        let schema = crate::config::settings_schema();
+        for key in [ENABLED_KEY, TIMEOUT_KEY, INTERPRETERS_KEY] {
+            let def = schema.iter().find(|d| d.key == key).expect(key);
+            assert_eq!(def.scope, Some(crate::config::SettingScope::Global), "{key}");
+        }
+    }
+
+    #[test]
+    fn interpreter_overrides_match_language_or_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let deno = dir.path().join("deno");
+        let python = dir.path().join("python3.12");
+        std::fs::write(&deno, "").unwrap();
+        std::fs::write(&python, "").unwrap();
+        let entries = vec![
+            String::new(),
+            format!("ts = {}", deno.display()),
+            format!("py={}", python.display()),
+        ];
+
+        // Matched by alias; deno's own arguments are used.
+        let (tool, path) = interpreter_override(&entries, runtime("typescript").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!((tool.program, path), ("deno", deno));
+        // An unrecognised file name falls back to the first tool's arguments.
+        let (tool, path) = interpreter_override(&entries, runtime("python").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!((tool.program, path), ("python3", python));
+        // No entry for this language: none.
+        assert!(interpreter_override(&entries, runtime("ruby").unwrap()).is_none());
+    }
+
+    #[test]
+    fn bad_interpreter_entries_explain_themselves() {
+        let go = runtime("go").unwrap();
+        let err = |entries: &[&str]| {
+            let entries: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
+            interpreter_override(&entries, go)
+                .unwrap()
+                .err()
+                .unwrap()
+                .to_string()
+        };
+        assert!(err(&["go /usr/bin/go"]).contains("language=/path"));
+        assert!(err(&["go=relative/go"]).contains("doesn't exist"));
+        assert!(err(&["go=/no/such/go"]).contains("doesn't exist"));
     }
 
     #[test]

@@ -308,7 +308,10 @@ export function saveClipboardImage(
 export type RunEvent =
   | { event: "stdout"; data: string }
   | { event: "stderr"; data: string }
-  | { event: "exit"; data: { code: number | null; cancelled: boolean; truncated: boolean } };
+  | {
+      event: "exit";
+      data: { code: number | null; cancelled: boolean; truncated: boolean; timedOut: boolean };
+    };
 
 export function runCode(
   runId: string,

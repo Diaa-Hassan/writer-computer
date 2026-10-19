@@ -20,6 +20,7 @@ if (!("getClientRects" in Range.prototype)) {
 }
 
 const tauri = await import("../src/lib/tauri");
+const { useSettingsStore } = await import("../src/stores/settings-store");
 const {
   __testCodeRun,
   codeRunExtension,
@@ -154,7 +155,10 @@ describe("Run All", () => {
       ran.push(code.trim());
       const exit = exitCodes.shift() ?? 0;
       setTimeout(() =>
-        onEvent({ event: "exit", data: { code: exit, cancelled: false, truncated: false } }),
+        onEvent({
+          event: "exit",
+          data: { code: exit, cancelled: false, truncated: false, timedOut: false },
+        }),
       );
     });
     return ran;
@@ -203,6 +207,36 @@ describe("Run All", () => {
       state: EditorState.create({ doc: "just prose", extensions: [codeRunExtension(() => "")] }),
     });
     expect(runCodeBlocks(view, "all")).toBe(false);
+    view.destroy();
+  });
+});
+
+describe("Run Code Blocks setting", () => {
+  const doc = "```bash\necho hi\n```";
+  const setEnabled = (enabled: boolean) =>
+    useSettingsStore.setState((state) => ({
+      settings: { ...state.settings, "code.run-enabled": enabled },
+    }));
+
+  test("off: no Run buttons, nothing for Run All", () => {
+    setEnabled(false);
+    const state = makeState(doc);
+    expect(widgets(state)).toEqual([]);
+    expect(runnableFenceStarts(state)).toEqual([]);
+    setEnabled(true);
+  });
+
+  test("turning it off removes the buttons from an open editor", () => {
+    setEnabled(true);
+    const view = new EditorView({
+      parent: document.body,
+      state: makeState(doc),
+    });
+    expect(widgets(view.state)).toHaveLength(1);
+    setEnabled(false);
+    expect(widgets(view.state)).toEqual([]);
+    setEnabled(true);
+    expect(widgets(view.state)).toHaveLength(1);
     view.destroy();
   });
 });

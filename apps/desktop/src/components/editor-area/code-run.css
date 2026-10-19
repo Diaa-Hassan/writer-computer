@@ -96,11 +96,13 @@
   background: #30a46c;
 }
 
-.cm-editor .cm-code-run-tray[data-status="failed"] .cm-code-run-dot {
+.cm-editor .cm-code-run-tray:is([data-status="failed"], [data-status="timedout"]) .cm-code-run-dot {
   background: #e5484d;
 }
 
-.cm-editor .cm-code-run-tray[data-status="failed"] .cm-code-run-status {
+.cm-editor
+  .cm-code-run-tray:is([data-status="failed"], [data-status="timedout"])
+  .cm-code-run-status {
   color: #e5484d;
 }
 

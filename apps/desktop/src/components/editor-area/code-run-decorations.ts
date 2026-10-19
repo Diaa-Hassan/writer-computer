@@ -22,6 +22,7 @@ import type { SyntaxNode } from "@lezer/common";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import runtimes from "@shared/code-runtimes.json";
 import { getParentDir } from "@/lib/paths";
+import { useSettingsStore } from "@/stores/settings-store";
 import { cancelRun, runCode, type RunEvent } from "@/lib/tauri";
 import "./code-run.css";
 
@@ -70,7 +71,7 @@ export function formatDuration(ms: number): string {
 // ---------------------------------------------------------------------------
 
 type Stream = "stdout" | "stderr";
-type RunStatus = "running" | "done" | "failed" | "stopped";
+type RunStatus = "running" | "done" | "failed" | "stopped" | "timedout";
 
 interface Chunk {
   stream: Stream;
@@ -113,7 +114,13 @@ function finishSession(
   // An unfinished escape at the very end is never completed; drop it.
   session.held = { stdout: "", stderr: "" };
   if (exit.truncated) appendChunk(session, "stderr", "\n[output stopped at 1 MiB]\n");
-  session.status = exit.cancelled ? "stopped" : exit.code === 0 ? "done" : "failed";
+  session.status = exit.timedOut
+    ? "timedout"
+    : exit.cancelled
+      ? "stopped"
+      : exit.code === 0
+        ? "done"
+        : "failed";
   session.exitCode = exit.code;
   session.endedAt = performance.now();
   for (const listener of session.listeners) listener();
@@ -181,6 +188,25 @@ function sessionAt(state: EditorState, pos: number): Session | undefined {
   });
   return found;
 }
+
+// ---------------------------------------------------------------------------
+// The "Run Code Blocks" setting
+// ---------------------------------------------------------------------------
+
+const ENABLED_SETTING = "code.run-enabled";
+const settingEnabled = () => useSettingsStore.getState().settings[ENABLED_SETTING] !== false;
+
+const setEnabled = StateEffect.define<boolean>();
+
+/** Mirrors the setting into editor state, so turning it off removes every
+ *  Run button and tray in the same rebuild (see `runSettingSync`). */
+const enabledField = StateField.define<boolean>({
+  create: settingEnabled,
+  update(enabled, tr) {
+    for (const effect of tr.effects) if (effect.is(setEnabled)) enabled = effect.value;
+    return enabled;
+  },
+});
 
 const filePathFacet = Facet.define<() => string, () => string>({
   combine: (values) => values[0] ?? (() => ""),
@@ -260,7 +286,12 @@ function startRun(view: EditorView, fence: RunnableFence): Session {
   runCode(id, fence.lang, fence.source, cwd, onEvent).catch((err: unknown) => {
     if (session.status !== "running") return;
     appendChunk(session, "stderr", `${String(err)}\n`);
-    finishSession(view, session, { code: null, cancelled: false, truncated: false });
+    finishSession(view, session, {
+      code: null,
+      cancelled: false,
+      truncated: false,
+      timedOut: false,
+    });
   });
   return session;
 }
@@ -282,6 +313,8 @@ const batches = new WeakMap<EditorView, Set<Batch>>();
  *  only fences that end before it. Parses the whole document first, since the
  *  editor otherwise only parses what is on screen. */
 export function runnableFenceStarts(state: EditorState, before?: number): number[] {
+  // `false` only when the extension is present and running is turned off.
+  if (state.field(enabledField, false) === false) return [];
   const tree = ensureSyntaxTree(state, state.doc.length, 1000) ?? syntaxTree(state);
   const starts: number[] = [];
   tree.iterate({
@@ -465,6 +498,8 @@ function statusText(session: Session, now: number): string {
       return `Done · ${elapsed}`;
     case "stopped":
       return `Stopped · ${elapsed}`;
+    case "timedout":
+      return `Time limit reached · ${elapsed}`;
     case "failed":
       return `Exit ${session.exitCode ?? "signal"} · ${elapsed}`;
   }
@@ -576,6 +611,7 @@ class RunTrayWidget extends WidgetType {
 // ---------------------------------------------------------------------------
 
 function buildDecorations(state: EditorState): DecorationSet {
+  if (!state.field(enabledField)) return Decoration.none;
   const ranges: Range<Decoration>[] = [];
   syntaxTree(state).iterate({
     enter: (ref) => {
@@ -611,7 +647,7 @@ const decorationsField = StateField.define<DecorationSet>({
   create: buildDecorations,
   update(decorations, tr) {
     const runEffect = tr.effects.some(
-      (e) => e.is(setRun) || e.is(clearRun) || e.is(sessionChanged),
+      (e) => e.is(setRun) || e.is(clearRun) || e.is(sessionChanged) || e.is(setEnabled),
     );
     if (tr.docChanged || runEffect || syntaxTree(tr.startState) !== syntaxTree(tr.state)) {
       return buildDecorations(tr.state);
@@ -649,11 +685,24 @@ const runLifecycle = ViewPlugin.define((view) => ({
   },
 }));
 
+/** Follows the setting: pushes changes into `enabledField` and, when running
+ *  is turned off, stops whatever is running in this editor. */
+const runSettingSync = ViewPlugin.define((view) => {
+  const unsubscribe = useSettingsStore.subscribe((state, prev) => {
+    const enabled = state.settings[ENABLED_SETTING] !== false;
+    if (enabled === (prev.settings[ENABLED_SETTING] !== false)) return;
+    if (!enabled) stopCodeRuns(view);
+    view.dispatch({ effects: setEnabled.of(enabled) });
+  });
+  return { destroy: unsubscribe };
+});
+
 const runKeymap = Prec.high(
   keymap.of([
     {
       key: "Alt-Enter",
       run: (view) => {
+        if (!view.state.field(enabledField)) return false;
         const fence = runnableFenceAt(view.state, view.state.selection.main.head);
         if (!fence) return false;
         toggleRun(view, fence);
@@ -665,7 +714,15 @@ const runKeymap = Prec.high(
 );
 
 export function codeRunExtension(getFilePath: () => string): Extension {
-  return [filePathFacet.of(getFilePath), runsField, decorationsField, runLifecycle, runKeymap];
+  return [
+    filePathFacet.of(getFilePath),
+    enabledField,
+    runsField,
+    decorationsField,
+    runLifecycle,
+    runSettingSync,
+    runKeymap,
+  ];
 }
 
 export const __testCodeRun = { decorationsField, runsField, setRun, clearRun, sessions };

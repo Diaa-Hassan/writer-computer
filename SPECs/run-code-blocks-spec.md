@@ -50,6 +50,14 @@ Known limits: Ruby, Perl and Lua buffer output when it isn't a terminal, so thei
 - Edits during a Run All don't derail it: the queued fence positions are mapped through every change, a block deleted meanwhile is skipped.
 - The palette acts on the visible tab's editor (`activeEditorView`: inactive panes stay mounted but carry `invisible`; a compact window has a single editor).
 
+## Settings (Settings → Code)
+
+All three are `"scope": "global"`, and a Rust test fails if that ever changes. Workspace settings live in `<folder>/.writer/config`, inside the folder, so a workspace-scoped run setting would let a cloned repo turn running on or point a language at a binary it ships. `Settings::get` already ignores workspace values for global keys.
+
+- **Run Code Blocks** (`code.run-enabled`, default on). Off: no Run buttons, trays, shortcuts or palette commands (the editor mirrors the setting into `enabledField` through a store subscription, so it applies to open notes at once), running blocks are stopped, and the backend refuses `run_code` with "Running code is turned off in Settings".
+- **Run Time Limit** (`code.timeout-seconds`, default 0 = none). A watchdog kills the run's process group when it's exceeded; the tray shows `Time limit reached · 30.0s` in red, and Run All stops there.
+- **Interpreters** (`code.interpreters`, list of `language=absolute path`, language may be an alias). Replaces the PATH lookup for that language. The tool whose program name matches the file name supplies the arguments (`typescript=/opt/homebrew/bin/deno` → `deno run -A`), otherwise the language's first tool (`python=/…/.venv/bin/python3.12` → `-u -c`). A malformed entry or a path that isn't an existing absolute file is reported in the tray instead of falling back silently.
+
 ## Design
 
 - `shared/code-runtimes.json` maps every fence language and alias → runtime id. The editor reads it to decide where to show Run and sends the id; `RUNTIMES` in `commands/run.rs` holds each runtime's tools. A test checks every mapped id exists and every runtime is reachable under its own name.

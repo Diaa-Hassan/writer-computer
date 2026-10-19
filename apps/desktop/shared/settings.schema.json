@@ -379,6 +379,33 @@
       "default": 50
     },
     {
+      "key": "code.run-enabled",
+      "label": "Run Code Blocks",
+      "description": "Show a Run button on code blocks in languages Writer can run (Bash, Python, JavaScript and more). Code runs on this computer with your permissions, and only when you click Run. Workspace settings can't turn this on.",
+      "category": "Code",
+      "type": "boolean",
+      "scope": "global",
+      "default": true
+    },
+    {
+      "key": "code.timeout-seconds",
+      "label": "Run Time Limit",
+      "description": "Stop a code block that runs longer than this many seconds. 0 means no limit.",
+      "category": "Code",
+      "type": "number",
+      "scope": "global",
+      "default": 0
+    },
+    {
+      "key": "code.interpreters",
+      "label": "Interpreters",
+      "description": "Run a language with a specific program instead of the first one found on your PATH. One per entry, as language=absolute path, e.g. python=/Users/me/project/.venv/bin/python.",
+      "category": "Code",
+      "type": "list",
+      "scope": "global",
+      "default": []
+    },
+    {
       "key": "telemetry.enabled",
       "label": "Share Usage Data",
       "description": "Send usage events (app opened, workspace opened, file and folder created) to help decide what to build next. Off until you turn it on. Never includes your documents, file names, or paths; the full list is in the Telemetry doc in Writer's repository.",
