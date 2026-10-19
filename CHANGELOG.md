@@ -4,6 +4,7 @@
 
 - Run bash code blocks. A ` ```bash ` block now has a Run button under it: click it to run the code in the note's folder and see its output (stdout, and stderr in red) appear under the block as it prints, then whether it finished or failed and with what exit code. Stop ends a run that is taking too long, including anything it started. Nothing runs unless you click Run, and output is never written into the note.
 - Run sits in the code block's top-right corner, and Option+Enter runs (or stops) the block the caret is in. Output appears in a tray attached under the block once it has run, with a status line (Running with a live timer, Done, Exit code, Stopped, each with how long it took) and buttons to copy the output, run again or clear it. Terminal colour codes are removed instead of showing as `[32m`, a run that prints nothing says "No output", and output stays put when you scroll the block out of view.
+- Run code in 13 languages: Bash, Zsh, sh, Python, JavaScript, TypeScript, Ruby, Perl, Lua, Go, Swift, AppleScript and PowerShell, with the usual short names (`py`, `js`, `ts`, `rb`, `ps1`…). Writer finds each tool the way your Terminal does, so Node from nvm, Python from pyenv or Bun from its own installer all work, and where a language has several tools it uses whichever is installed (TypeScript runs with Bun, Deno or tsx). If none is installed, the block says which one to install.
 
 ## 2026-10-17
 

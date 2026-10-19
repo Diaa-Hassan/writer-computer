@@ -1,7 +1,7 @@
 import { ok, strictEqual } from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
 
-// Running ```bash fences: seeds a note with two bash blocks, opens it, and
+// Running code fences: seeds a note with bash, python and js blocks, opens it, and
 // asserts each gets a corner Run button, a run streams stdout and stderr into the panel
 // in the note's folder and reports its exit code, and Stop kills a block that
 // would otherwise sleep for a minute (see SPECs/run-code-blocks-spec.md).
@@ -9,7 +9,7 @@ import { rmSync, writeFileSync } from "node:fs";
 // Requires a restorable workspace: seed
 // `~/Library/Application Support/com.writer-computer.e2e/recent_workspaces.json`
 // with a real directory before launching. Without one this suite self-skips.
-describe("Running bash code blocks", function () {
+describe("Running code blocks", function () {
   const FILE_STEM = "code-run-e2e";
   const DOC = [
     "# Code run check",
@@ -22,6 +22,14 @@ describe("Running bash code blocks", function () {
     "",
     "```bash",
     "for i in $(seq 60); do echo tick $i; sleep 1; done",
+    "```",
+    "",
+    "```py",
+    'print("py:", 6 * 7)',
+    "```",
+    "",
+    "```js",
+    'console.log("js:" + 6 * 7)',
     "```",
     "",
     "after",
@@ -93,17 +101,17 @@ describe("Running bash code blocks", function () {
     if (filePath) rmSync(filePath, { force: true });
   });
 
-  it("puts a Run button in the corner of each bash fence and no tray yet", async function () {
+  it("puts a Run button in the corner of each runnable fence and no tray yet", async function () {
     const row = await $(`span*=Code run check`);
     await row.waitForExist({ timeout: 15_000 });
     await row.click();
 
-    await browser.waitUntil(async () => (await ui()).toggles.length === 2, {
+    await browser.waitUntil(async () => (await ui()).toggles.length === 4, {
       timeout: 10_000,
       timeoutMsg: "run buttons never rendered",
     });
     const { toggles, trays } = await ui();
-    strictEqual(toggles.join(","), "Run,Run");
+    strictEqual(toggles.join(","), "Run,Run,Run,Run");
     strictEqual(trays.length, 0);
   });
 
@@ -149,10 +157,25 @@ describe("Running bash code blocks", function () {
     strictEqual(stopped.toggles[1], "Run");
   });
 
+  it("runs other languages through the user's login-shell PATH", async function () {
+    await clickToggle(2);
+    await clickToggle(3);
+    await browser.waitUntil(
+      async () => {
+        const { trays } = await ui();
+        return trays.length === 4 && trays[2].state !== "running" && trays[3].state !== "running";
+      },
+      { timeout: 15_000, timeoutMsg: "python/node runs never finished" },
+    );
+    const { trays } = await ui();
+    strictEqual(trays[2].stdout, "py: 42\n", `python: ${trays[2].stderr}`);
+    strictEqual(trays[3].stdout, "js:42\n", `node: ${trays[3].stderr}`);
+  });
+
   it("clears a tray", async function () {
     const clear = await $$(".cm-code-run-tray")[0].$('button[aria-label="Clear output"]');
     await clear.click();
-    await browser.waitUntil(async () => (await ui()).trays.length === 1, {
+    await browser.waitUntil(async () => (await ui()).trays.length === 3, {
       timeout: 5_000,
       timeoutMsg: "Clear did not remove the tray",
     });

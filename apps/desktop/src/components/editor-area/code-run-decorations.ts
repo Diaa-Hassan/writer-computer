@@ -25,10 +25,13 @@ import { getParentDir } from "@/lib/paths";
 import { cancelRun, runCode, type RunEvent } from "@/lib/tauri";
 import "./code-run.css";
 
-/** Fence language (first word of the info string) when it can run, else null. */
+const runtimeByLang: Record<string, string> = runtimes;
+
+/** Runtime id for a fence's language (first word of the info string, so
+ *  aliases like `py` or `js` resolve), or null when it can't run. */
 export function runnableLang(info: string): string | null {
   const lang = info.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
-  return Object.prototype.hasOwnProperty.call(runtimes, lang) ? lang : null;
+  return Object.prototype.hasOwnProperty.call(runtimeByLang, lang) ? runtimeByLang[lang] : null;
 }
 
 // ---------------------------------------------------------------------------

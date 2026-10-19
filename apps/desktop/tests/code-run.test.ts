@@ -35,8 +35,15 @@ describe("runnableLang", () => {
     expect(runnableLang(" Bash title=setup")).toBe("bash");
   });
 
+  test("resolves aliases to their runtime", () => {
+    expect(runnableLang("py")).toBe("python");
+    expect(runnableLang("JS")).toBe("javascript");
+    expect(runnableLang("ts")).toBe("typescript");
+    expect(runnableLang("shell")).toBe("sh");
+  });
+
   test("rejects languages without a runtime", () => {
-    expect(runnableLang("python")).toBeNull();
+    expect(runnableLang("rust")).toBeNull();
     expect(runnableLang("")).toBeNull();
     expect(runnableLang("toString")).toBeNull();
   });
@@ -52,7 +59,7 @@ describe("code run decorations", () => {
   });
 
   test("other languages, unclosed fences and empty fences get nothing", () => {
-    expect(widgets(makeState("```python\nprint(1)\n```"))).toEqual([]);
+    expect(widgets(makeState("```rust\nfn main() {}\n```"))).toEqual([]);
     expect(widgets(makeState("```bash\necho still typing"))).toEqual([]);
     expect(widgets(makeState("```bash\n\n```"))).toEqual([]);
   });

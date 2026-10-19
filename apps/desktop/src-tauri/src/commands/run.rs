@@ -3,13 +3,19 @@
 //!
 //! Nothing here runs on its own: a run starts only from the widget's Run
 //! button. Each run is a fresh process; there is no shared session.
+//!
+//! Interpreters are found on the user's login-shell PATH (see `user_path`),
+//! so tools installed through nvm, pyenv, bun or asdf resolve the same way
+//! they do in Terminal.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, OnceLock};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -22,10 +28,140 @@ use crate::error::AppError;
 /// loop can't flood the webview.
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 
-/// Fence languages that can run, and the interpreter each one uses. Mirrors
-/// `shared/code-runtimes.json`, which the editor reads to decide where to show
-/// a Run button; a test keeps the two in sync.
-const RUNTIMES: &[(&str, &str)] = &[("bash", "bash")];
+/// How a runtime receives the block's code.
+#[derive(Debug, PartialEq)]
+enum Source {
+    /// As the last argument: `bash -c <code>`.
+    Inline,
+    /// Written to `main.<ext>` in a per-run temp dir, whose path is the last
+    /// argument: `go run /tmp/…/main.go`. For tools that only read files.
+    File(&'static str),
+}
+
+/// One way to run a language: a program, its arguments, and how it takes
+/// the code.
+struct Tool {
+    program: &'static str,
+    args: &'static [&'static str],
+    source: Source,
+}
+
+const fn inline(program: &'static str, args: &'static [&'static str]) -> Tool {
+    Tool {
+        program,
+        args,
+        source: Source::Inline,
+    }
+}
+
+const fn file(program: &'static str, args: &'static [&'static str], ext: &'static str) -> Tool {
+    Tool {
+        program,
+        args,
+        source: Source::File(ext),
+    }
+}
+
+/// A language and the tools that can run it, in order of preference. A run
+/// uses the first tool installed on the user's PATH, so the same note works
+/// on machines set up differently (bun here, deno there).
+struct Runtime {
+    id: &'static str,
+    label: &'static str,
+    tools: &'static [Tool],
+}
+
+/// Every runtime, by id. `shared/code-runtimes.json` maps fence languages and
+/// their aliases (`py`, `js`, …) to these ids; the editor reads it to decide
+/// where to show Run, and a test keeps the two in sync.
+const RUNTIMES: &[Runtime] = &[
+    Runtime {
+        id: "bash",
+        label: "Bash",
+        tools: &[inline("bash", &["-c"])],
+    },
+    Runtime {
+        id: "zsh",
+        label: "Zsh",
+        tools: &[inline("zsh", &["-c"])],
+    },
+    Runtime {
+        id: "sh",
+        label: "sh",
+        tools: &[inline("sh", &["-c"])],
+    },
+    Runtime {
+        id: "python",
+        label: "Python",
+        // -u: unbuffered, so output streams instead of arriving at exit.
+        tools: &[
+            inline("python3", &["-u", "-c"]),
+            inline("python", &["-u", "-c"]),
+        ],
+    },
+    Runtime {
+        id: "javascript",
+        label: "JavaScript",
+        tools: &[
+            inline("node", &["-e"]),
+            inline("bun", &["-e"]),
+            inline("deno", &["eval"]),
+        ],
+    },
+    Runtime {
+        id: "typescript",
+        label: "TypeScript",
+        tools: &[
+            file("bun", &["run"], "ts"),
+            // -A: deno sandboxes by default; every other runtime here has the
+            // user's full access, so match that.
+            file("deno", &["run", "-A"], "ts"),
+            file("tsx", &[], "ts"),
+        ],
+    },
+    Runtime {
+        id: "ruby",
+        label: "Ruby",
+        tools: &[inline("ruby", &["-e"])],
+    },
+    Runtime {
+        id: "perl",
+        label: "Perl",
+        tools: &[inline("perl", &["-e"])],
+    },
+    Runtime {
+        id: "lua",
+        label: "Lua",
+        tools: &[inline("lua", &["-e"]), inline("luajit", &["-e"])],
+    },
+    Runtime {
+        id: "go",
+        label: "Go",
+        tools: &[file("go", &["run"], "go")],
+    },
+    Runtime {
+        id: "swift",
+        label: "Swift",
+        tools: &[file("swift", &[], "swift")],
+    },
+    Runtime {
+        id: "applescript",
+        label: "AppleScript",
+        tools: &[inline("osascript", &["-e"])],
+    },
+    Runtime {
+        id: "powershell",
+        label: "PowerShell",
+        tools: &[inline(
+            "pwsh",
+            &["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
+        )],
+    },
+];
+
+/// How long to wait for the login shell to report its PATH.
+const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(5);
+const PATH_MARKER: &str = "__WRITER_PATH__";
 
 /// GUI apps on macOS don't inherit the login shell's PATH, so Homebrew tools
 /// would be missing from every run without these.
@@ -53,15 +189,97 @@ struct RunHandle {
 #[derive(Default)]
 pub struct RunRegistry(Mutex<HashMap<String, RunHandle>>);
 
-pub fn runtime_for(lang: &str) -> Option<&'static str> {
-    let lang = lang.trim().to_ascii_lowercase();
-    RUNTIMES
-        .iter()
-        .find(|(name, _)| *name == lang)
-        .map(|(_, cmd)| *cmd)
+fn runtime(id: &str) -> Option<&'static Runtime> {
+    RUNTIMES.iter().find(|r| r.id == id)
 }
 
-fn path_with_extras(current: Option<std::ffi::OsString>) -> std::ffi::OsString {
+/// Absolute path of `program` in the first PATH entry that has it.
+fn find_program(program: &str, path: &OsString) -> Option<PathBuf> {
+    std::env::split_paths(path).find_map(|dir| {
+        let candidate = dir.join(program);
+        #[cfg(windows)]
+        let candidate = candidate.with_extension("exe");
+        candidate.is_file().then_some(candidate)
+    })
+}
+
+/// The first of the runtime's tools that is installed, with its path.
+fn resolve_tool(
+    runtime: &'static Runtime,
+    path: &OsString,
+) -> Result<(&'static Tool, PathBuf), AppError> {
+    runtime
+        .tools
+        .iter()
+        .find_map(|tool| find_program(tool.program, path).map(|found| (tool, found)))
+        .ok_or_else(|| {
+            let names: Vec<_> = runtime
+                .tools
+                .iter()
+                .map(|t| format!("`{}`", t.program))
+                .collect();
+            AppError::Message(format!(
+                "Can't run {}: install {} (or make sure your shell's PATH includes it)",
+                runtime.label,
+                names.join(" or ")
+            ))
+        })
+}
+
+/// PATH as the user's login shell sets it, plus the Homebrew folders. Asked
+/// once, on the first run (never at startup: an interactive shell runs the
+/// user's rc files), and cached; falls back to the app's own PATH when the
+/// shell doesn't answer in time.
+fn user_path() -> &'static OsString {
+    static USER_PATH: OnceLock<OsString> = OnceLock::new();
+    USER_PATH
+        .get_or_init(|| path_with_extras(login_shell_path().or_else(|| std::env::var_os("PATH"))))
+}
+
+fn login_shell_path() -> Option<OsString> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let script = if Path::new(&shell).file_name().is_some_and(|n| n == "fish") {
+        // fish keeps PATH as a list; "$PATH" would join it with spaces.
+        format!("printf '{PATH_MARKER}%s{PATH_MARKER}' (string join : $PATH)")
+    } else {
+        format!("printf '{PATH_MARKER}%s{PATH_MARKER}' \"$PATH\"")
+    };
+    let mut command = Command::new(&shell);
+    // -i as well as -l: version managers usually hook in from .zshrc/.bashrc.
+    command
+        .arg("-ilc")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        let _ = tx.send(out);
+    });
+    let out = rx.recv_timeout(LOGIN_SHELL_TIMEOUT);
+    kill_group(child.id());
+    let _ = child.wait();
+    marked_path(&out.ok()?)
+}
+
+/// The text between the first two markers; rc files may print around it.
+fn marked_path(out: &str) -> Option<OsString> {
+    let mut parts = out.split(PATH_MARKER);
+    parts.next()?;
+    let path = parts.next()?;
+    (parts.next().is_some() && !path.is_empty()).then(|| path.into())
+}
+
+fn path_with_extras(current: Option<OsString>) -> OsString {
     let mut parts: Vec<std::path::PathBuf> = current
         .as_deref()
         .map(|p| std::env::split_paths(p).collect())
@@ -110,7 +328,26 @@ fn kill_group(pid: u32) {
 #[cfg(not(unix))]
 fn kill_group(_pid: u32) {}
 
-#[tauri::command]
+/// Writes the block to `main.<ext>` in a temp dir named after the run.
+fn write_source(run_id: &str, ext: &str, code: &str) -> Result<(PathBuf, PathBuf), AppError> {
+    // The id names a directory, so it must not be able to climb out of it.
+    if run_id.is_empty()
+        || !run_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(AppError::InvalidPath(format!("bad run id `{run_id}`")));
+    }
+    let dir = std::env::temp_dir().join(format!("writer-run-{run_id}"));
+    std::fs::create_dir_all(&dir)?;
+    let file = dir.join(format!("main.{ext}"));
+    std::fs::write(&file, code)?;
+    Ok((dir, file))
+}
+
+// `async` keeps it off the main thread: the first run waits for the login
+// shell's PATH.
+#[tauri::command(async)]
 pub fn run_code(
     run_id: String,
     lang: String,
@@ -119,14 +356,29 @@ pub fn run_code(
     on_event: Channel<RunEvent>,
     registry: State<'_, Arc<RunRegistry>>,
 ) -> Result<(), AppError> {
-    let program = runtime_for(&lang)
-        .ok_or_else(|| AppError::Unsupported(format!("no runtime for `{lang}`")))?;
+    let runtime =
+        runtime(&lang).ok_or_else(|| AppError::Unsupported(format!("no runtime for `{lang}`")))?;
+    let path = user_path();
+    let (tool, program_path) = resolve_tool(runtime, path)?;
+    let program = tool.program;
+    let temp_dir = match tool.source {
+        Source::Inline => None,
+        Source::File(ext) => Some(write_source(&run_id, ext, &code)?),
+    };
+    let cleanup = move |dir: Option<(PathBuf, PathBuf)>| {
+        if let Some((dir, _)) = dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    };
 
-    let mut command = Command::new(program);
+    let mut command = Command::new(&program_path);
+    command.args(tool.args);
+    match &temp_dir {
+        Some((_, file)) => command.arg(file),
+        None => command.arg(&code),
+    };
     command
-        .arg("-c")
-        .arg(&code)
-        .env("PATH", path_with_extras(std::env::var_os("PATH")))
+        .env("PATH", path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -139,9 +391,13 @@ pub fn run_code(
         command.process_group(0);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|e| AppError::Io(format!("failed to start {program}: {e}")))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            cleanup(temp_dir);
+            return Err(AppError::Io(format!("failed to start {program}: {e}")));
+        }
+    };
     let pid = child.id();
     let cancelled = Arc::new(AtomicBool::new(false));
     registry.0.lock().insert(
@@ -216,6 +472,7 @@ pub fn run_code(
         }
         let code = child.wait().ok().and_then(|status| status.code());
         registry.0.lock().remove(&run_id);
+        cleanup(temp_dir);
         let _ = on_event.send(RunEvent::Exit {
             code,
             cancelled: cancelled.load(Ordering::Relaxed),
@@ -239,20 +496,85 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_registered_languages_run() {
-        assert_eq!(runtime_for("bash"), Some("bash"));
-        assert_eq!(runtime_for(" Bash "), Some("bash"));
-        assert_eq!(runtime_for("python"), None);
-        assert_eq!(runtime_for(""), None);
-    }
-
-    #[test]
     fn runtimes_match_shared_contract() {
         let shared: std::collections::BTreeMap<String, String> =
             serde_json::from_str(include_str!("../../../shared/code-runtimes.json")).unwrap();
-        let ours: std::collections::BTreeMap<String, String> =
-            RUNTIMES.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        assert_eq!(shared, ours);
+        // Every fence language points at a runtime that exists…
+        for (lang, id) in &shared {
+            assert_eq!(
+                lang,
+                &lang.to_ascii_lowercase(),
+                "fence names are lowercase"
+            );
+            assert!(
+                runtime(id).is_some(),
+                "`{lang}` maps to unknown runtime `{id}`"
+            );
+        }
+        // …and every runtime is reachable under its own name.
+        for r in RUNTIMES {
+            assert_eq!(
+                shared.get(r.id).map(String::as_str),
+                Some(r.id),
+                "`{}` unreachable",
+                r.id
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_runtimes_are_rejected() {
+        assert!(runtime("bash").is_some());
+        assert!(
+            runtime("py").is_none(),
+            "aliases resolve in the editor, not here"
+        );
+        assert!(runtime("").is_none());
+    }
+
+    #[test]
+    fn the_first_installed_tool_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path: OsString = dir.path().into();
+        let ts = runtime("typescript").unwrap();
+
+        let err = resolve_tool(ts, &path).err().unwrap().to_string();
+        assert!(err.contains("`bun` or `deno` or `tsx`"), "{err}");
+
+        // Only deno and tsx installed: deno is preferred.
+        for name in ["deno", "tsx"] {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+        let (tool, found) = resolve_tool(ts, &path).unwrap();
+        assert_eq!(tool.program, "deno");
+        assert_eq!(found, dir.path().join("deno"));
+    }
+
+    #[test]
+    fn login_shell_path_is_read_between_markers() {
+        let out = format!("rc noise\n{PATH_MARKER}/a:/b{PATH_MARKER}more noise");
+        assert_eq!(marked_path(&out), Some("/a:/b".into()));
+        assert_eq!(marked_path("no markers"), None);
+        assert_eq!(
+            marked_path(&format!("{PATH_MARKER}/a")),
+            None,
+            "unterminated"
+        );
+        assert_eq!(
+            marked_path(&format!("{PATH_MARKER}{PATH_MARKER}")),
+            None,
+            "empty"
+        );
+    }
+
+    #[test]
+    fn run_ids_cannot_escape_the_temp_dir() {
+        assert!(write_source("../evil", "sh", "").is_err());
+        assert!(write_source("a/b", "sh", "").is_err());
+        assert!(write_source("", "sh", "").is_err());
+        let (dir, file) = write_source("test-0001", "go", "package main").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "package main");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

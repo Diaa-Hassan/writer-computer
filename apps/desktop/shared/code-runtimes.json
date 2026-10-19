@@ -1,3 +1,27 @@
 {
-  "bash": "bash"
+  "applescript": "applescript",
+  "bash": "bash",
+  "go": "go",
+  "golang": "go",
+  "javascript": "javascript",
+  "js": "javascript",
+  "lua": "lua",
+  "node": "javascript",
+  "osascript": "applescript",
+  "perl": "perl",
+  "pl": "perl",
+  "powershell": "powershell",
+  "ps1": "powershell",
+  "pwsh": "powershell",
+  "py": "python",
+  "python": "python",
+  "python3": "python",
+  "rb": "ruby",
+  "ruby": "ruby",
+  "sh": "sh",
+  "shell": "sh",
+  "swift": "swift",
+  "ts": "typescript",
+  "typescript": "typescript",
+  "zsh": "zsh"
 }
