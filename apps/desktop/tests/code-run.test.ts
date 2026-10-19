@@ -27,6 +27,7 @@ const {
   formatDuration,
   runCodeBlocks,
   runnableFenceStarts,
+  hasSessionBlocks,
   parseFenceOptions,
   runnableLang,
   wantsSecretInput,
@@ -112,6 +113,8 @@ describe("code run decorations", () => {
       settle: () => {},
       trustFolder: null,
       launch: () => {},
+      shared: false,
+      sessionEnded: false,
     });
     let state = makeState(doc);
     state = state.update({ effects: setRun.of({ pos: fenceFrom, id: "r1" }) }).state;
@@ -137,22 +140,23 @@ describe("parseFenceOptions", () => {
       timeoutSeconds: 30,
       color: true,
       skip: true,
+      fresh: false,
     });
     expect(parseFenceOptions("py dir=~/proj timeout=2.5s")).toEqual({
       dir: "~/proj",
       timeoutSeconds: 2.5,
       color: false,
       skip: false,
+      fresh: false,
     });
   });
 
   test("ignores the language, unknown words and bad values", () => {
-    expect(parseFenceOptions("skip")).toEqual({ color: false, skip: false });
-    expect(parseFenceOptions('bash title="skip this" {1,3} timeout=soon cwd=')).toEqual({
-      color: false,
-      skip: false,
-    });
-    expect(parseFenceOptions("bash timeout=-1 color=yes")).toEqual({ color: false, skip: false });
+    const none = { color: false, skip: false, fresh: false };
+    expect(parseFenceOptions("skip")).toEqual(none);
+    expect(parseFenceOptions('bash title="skip this" {1,3} timeout=soon cwd=')).toEqual(none);
+    expect(parseFenceOptions("bash timeout=-1 color=yes fresh=1")).toEqual(none);
+    expect(parseFenceOptions("py fresh")).toEqual({ ...none, fresh: true });
   });
 });
 
@@ -171,6 +175,15 @@ describe("wantsSecretInput", () => {
     expect(wantsSecretInput(out("password changed\n", "Next: "))).toBe(false);
     expect(wantsSecretInput([{ stream: "stdin", text: "my password\n" }])).toBe(false);
     expect(wantsSecretInput(out("spinning\n"))).toBe(false);
+  });
+});
+
+describe("shared sessions", () => {
+  test("hasSessionBlocks: only shell and Python blocks not marked fresh", () => {
+    expect(hasSessionBlocks(makeState("```bash\necho\n```"))).toBe(true);
+    expect(hasSessionBlocks(makeState("```py\nx = 1\n```"))).toBe(true);
+    expect(hasSessionBlocks(makeState("```py fresh\nx = 1\n```"))).toBe(false);
+    expect(hasSessionBlocks(makeState("```go\npackage main\n```"))).toBe(false);
   });
 });
 
@@ -201,10 +214,16 @@ describe("Run All", () => {
         setTimeout(() =>
           onEvent({
             event: "exit",
-            data: { code: exit, cancelled: false, truncated: false, timedOut: false },
+            data: {
+              code: exit,
+              cancelled: false,
+              truncated: false,
+              timedOut: false,
+              sessionEnded: false,
+            },
           }),
         );
-        return { status: "started" };
+        return { status: "started", shared: false };
       },
     );
     return ran;
@@ -243,6 +262,16 @@ describe("Run All", () => {
     );
     await flush();
     expect(ran).toEqual(["echo one", "print('skip me? no, I run')", "exit 1"]);
+    view.destroy();
+  });
+
+  test("each run passes the note as its session key, and fresh", async () => {
+    fakeRuns([0, 0, 0, 0]);
+    const view = makeView();
+    runCodeBlocks(view, "all");
+    await vi.waitFor(() => expect(tauri.runCode).toHaveBeenCalledTimes(4));
+    const options = vi.mocked(tauri.runCode).mock.calls.map((call) => call[4]);
+    expect(options[0]).toMatchObject({ sessionKey: "/notes/a.md", fresh: false });
     view.destroy();
   });
 
@@ -319,10 +348,16 @@ describe("Trusted Folders", () => {
         setTimeout(() =>
           onEvent({
             event: "exit",
-            data: { code: 0, cancelled: false, truncated: false, timedOut: false },
+            data: {
+              code: 0,
+              cancelled: false,
+              truncated: false,
+              timedOut: false,
+              sessionEnded: false,
+            },
           }),
         );
-        return { status: "started" };
+        return { status: "started", shared: false };
       },
     );
     return ran;
@@ -387,10 +422,16 @@ describe("Trusted Folders", () => {
         setTimeout(() =>
           onEvent({
             event: "exit",
-            data: { code: 0, cancelled: false, truncated: false, timedOut: false },
+            data: {
+              code: 0,
+              cancelled: false,
+              truncated: false,
+              timedOut: false,
+              sessionEnded: false,
+            },
           }),
         );
-        return { status: "started" };
+        return { status: "started", shared: false };
       },
     );
     const setSetting = vi.fn(async () => {

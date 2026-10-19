@@ -28,6 +28,7 @@ import {
   useOpenTabs,
 } from "@/hooks/use-tabs";
 import { useTheme } from "@/hooks/use-theme";
+import { useSettingsStore } from "@/stores/settings-store";
 import { resetZoom, zoomIn, zoomOut } from "@/hooks/zoom-api";
 import { useFuzzySearch } from "./use-fuzzy-search";
 import { useGlobalRecentFiles } from "@/hooks/use-global-recent-files";
@@ -37,6 +38,8 @@ import {
   activeEditorView,
   hasRunningCode,
   runCodeBlocks,
+  hasSessionBlocks,
+  restartCodeSessions,
   runnableFenceStarts,
   stopCodeRuns,
 } from "@/components/editor-area/code-run-decorations";
@@ -138,6 +141,10 @@ export function CommandPalette() {
   const caret = codeView?.state.selection.main.head ?? 0;
   const hasBlocksAbove = runnableStarts.some((start) => start < caret);
   const codeRunning = codeView ? hasRunningCode(codeView) : false;
+  const sharedSessions =
+    codeView !== null &&
+    useSettingsStore.getState().settings["code.shared-sessions"] !== false &&
+    hasSessionBlocks(codeView.state);
 
   type Command = { id: string; label: string; description: string; run: () => void };
 
@@ -257,6 +264,16 @@ export function CommandPalette() {
         run: () => {
           close();
           runCodeBlocks(codeView, "above");
+        },
+      },
+    codeView &&
+      sharedSessions && {
+        id: "restart-code-sessions",
+        label: "Restart Code Sessions",
+        description: "Command",
+        run: () => {
+          close();
+          restartCodeSessions(codeView);
         },
       },
     codeView &&

@@ -107,6 +107,17 @@ Words after the language in the info string, parsed by the editor (`parseFenceOp
 - **sudo** in bash, zsh and sh blocks is wrapped as `sudo() { command sudo -S "$@"; }; ` on the block's first line (line numbers unchanged), so it reads the password from the input line instead of needing a terminal.
 - A block that waits for input waits, including during Run All; Stop and the time limit still apply. Writes happen off the registry lock, so a program that never reads can't block Stop.
 
+## Shared sessions
+
+A note's **bash, zsh, sh and Python** blocks each run in one live session per language (Settings → Code → **Shared Sessions**, on by default): later blocks see the variables, functions, imports, `cd` and `export`s left by blocks run before them, like cells in a notebook. Nothing is replayed: each block runs exactly once. Other languages run fresh every time. ` ```bash fresh ` runs one block on its own. The tray's status ends in `· session` for a block that ran in one.
+
+- **How:** `commands/session.rs` starts the interpreter with a small driver and a control FIFO. Each block is written to a file and sent as one control line (fields separated by US `\x1f`; tabs would collapse empty fields in a shell `read`). The driver runs it (shells: `. file < input`; Python: `exec` in one namespace) with the block's own input FIFO as stdin, so typed input reaches only that block and End input ends only that block's input. Then it prints `RS "WRITER-END " id " " status RS` on stdout and stderr; the readers cut each stream at that marker, so every block gets exactly its output and status.
+- **Errors:** a failing command is the block's status and the session carries on. Python exceptions print a traceback that starts at the block (`File "<block>"`), `sys.exit(n)` ends the block with `n`, not the session.
+- **Stop / time limit / 1 MiB:** Python gets Ctrl-C (`KeyboardInterrupt`, status 130) and keeps its state; if it ignores it for 3 s the session is killed. Shells can't be interrupted without dying, so their session is killed and the tray says `· session ended`; the next run starts a new one. `exit` in a shell block ends the session the same way.
+- **Lifetime:** a session belongs to its window, note and language. It ends when the note's tab closes, with ⌘P **Restart Code Sessions** (offered when the note has session blocks), when the language's interpreter changes in Settings (replaced on the next run), and when Writer quits (`RunEvent::Exit` kills every run and session and removes their temp folders). If Writer is killed instead, sessions exit on their own (their control pipe closes) and a startup sweep removes `writer-session-*`/`writer-run-*` temp folders older than a day.
+- **One block at a time** per session: running a second block while one is running says so in the tray.
+- **cwd / color in a session:** `cwd=` changes the session's folder from then on, and `color` exports the colour variables into the session, the same as typing `cd`/`export` there.
+
 ## Design
 
 - `shared/code-runtimes.json` maps every fence language and alias → runtime id. The editor reads it to decide where to show Run and sends the id; `RUNTIMES` in `commands/run.rs` holds each runtime's tools. A test checks every mapped id exists and every runtime is reachable under its own name.
@@ -122,7 +133,7 @@ Add a `Runtime` to `RUNTIMES` in `commands/run.rs` (its tools, each `inline(prog
 
 ## Non-goals (this version)
 
-- Shared state between blocks, variables across blocks or languages.
+- Values shared across languages (bash ↔ Python), and Python-style sessions for other languages.
 - A terminal/TTY (programs see pipes; `color` covers the common colour switches), carriage-return progress bars redrawing in place.
 - Saving output into the note.
 - Running from Reading/preview surfaces other than the editor.

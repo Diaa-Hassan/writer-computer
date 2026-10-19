@@ -28,7 +28,7 @@ use crate::state::AppState;
 
 /// Output past this many bytes (stdout + stderr) stops the run, so a runaway
 /// loop can't flood the webview.
-const OUTPUT_LIMIT: usize = 1024 * 1024;
+pub(crate) const OUTPUT_LIMIT: usize = 1024 * 1024;
 
 /// How a runtime receives the block's code.
 #[derive(Debug, PartialEq)]
@@ -51,7 +51,7 @@ const COMPILE_SCRIPT: &str =
 
 /// Set for every run. dotnet prints a first-run banner into the output
 /// otherwise.
-const RUN_ENV: &[(&str, &str)] = &[("DOTNET_NOLOGO", "1")];
+pub(crate) const RUN_ENV: &[(&str, &str)] = &[("DOTNET_NOLOGO", "1")];
 
 /// One way to run a language: a program, its arguments, and how it takes
 /// the code.
@@ -318,19 +318,70 @@ pub enum RunEvent {
         cancelled: bool,
         truncated: bool,
         timed_out: bool,
+        /// The block's shared session ended with it (Stop on a shell
+        /// session, `exit`, a crash): the next run starts a new one.
+        session_ended: bool,
     },
 }
 
-struct RunHandle {
-    pid: u32,
-    cancelled: Arc<AtomicBool>,
-    /// The program's input, until the user ends it (or the run ends).
-    stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
+/// Where a run's events go: a Tauri channel in the app, a closure in tests.
+pub(crate) type Sink = Arc<dyn Fn(RunEvent) + Send + Sync>;
+
+/// A run's input: the program's stdin once it is open, text typed before
+/// then, and whether the user ended it.
+#[derive(Default)]
+pub(crate) struct StdinSlot {
+    pipe: Option<Box<dyn std::io::Write + Send>>,
+    pending: Vec<u8>,
+    closed: bool,
+}
+
+impl StdinSlot {
+    pub(crate) fn attach(&mut self, mut pipe: Box<dyn std::io::Write + Send>) {
+        if self.closed {
+            return;
+        }
+        if !self.pending.is_empty() {
+            let _ = pipe.write_all(&std::mem::take(&mut self.pending));
+            let _ = pipe.flush();
+        }
+        self.pipe = Some(pipe);
+    }
+
+    pub(crate) fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if self.closed {
+            return Err(std::io::Error::other(
+                "input was already ended for this run",
+            ));
+        }
+        match self.pipe.as_mut() {
+            Some(pipe) => pipe.write_all(bytes).and_then(|()| pipe.flush()),
+            None => {
+                self.pending.extend_from_slice(bytes);
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn close(&mut self) {
+        self.closed = true;
+        self.pipe = None;
+        self.pending.clear();
+    }
+}
+
+pub(crate) struct RunHandle {
+    /// Process group to kill when the app quits.
+    pub(crate) group: u32,
+    pub(crate) cancelled: Arc<AtomicBool>,
+    pub(crate) stdin: Arc<Mutex<StdinSlot>>,
+    /// What Stop does: kill the run's group, or Ctrl-C a Python session.
+    pub(crate) stop: Arc<dyn Fn() + Send + Sync>,
 }
 
 /// Live runs keyed by the id the widget generated, so Stop can find them.
 #[derive(Default)]
-pub struct RunRegistry(Mutex<HashMap<String, RunHandle>>);
+pub struct RunRegistry(pub(crate) Mutex<HashMap<String, RunHandle>>);
 
 fn runtime(id: &str) -> Option<&'static Runtime> {
     RUNTIMES.iter().find(|r| r.id == id)
@@ -438,7 +489,7 @@ fn path_with_extras(current: Option<OsString>) -> OsString {
 /// Split `buf` into the longest valid UTF-8 prefix and the bytes of a
 /// multi-byte character cut off at the end of a read. Invalid bytes in the
 /// middle are replaced, not carried.
-fn take_utf8(buf: &mut Vec<u8>) -> String {
+pub(crate) fn take_utf8(buf: &mut Vec<u8>) -> String {
     match std::str::from_utf8(buf) {
         Ok(s) => {
             let out = s.to_owned();
@@ -460,7 +511,7 @@ fn take_utf8(buf: &mut Vec<u8>) -> String {
 }
 
 #[cfg(unix)]
-fn kill_group(pid: u32) {
+pub(crate) fn kill_group(pid: u32) {
     // The child leads its own process group, so this also stops anything it
     // spawned (`sleep`, pipelines). ESRCH just means it already exited.
     unsafe {
@@ -469,7 +520,7 @@ fn kill_group(pid: u32) {
 }
 
 #[cfg(not(unix))]
-fn kill_group(_pid: u32) {}
+pub(crate) fn kill_group(_pid: u32) {}
 
 // ---------------------------------------------------------------------------
 // Settings (all global-scope in the schema, so a workspace's own
@@ -480,12 +531,14 @@ const ENABLED_KEY: &str = "code.run-enabled";
 const TIMEOUT_KEY: &str = "code.timeout-seconds";
 const INTERPRETERS_KEY: &str = "code.interpreters";
 const TRUSTED_KEY: &str = "code.trusted-folders";
+const SESSIONS_KEY: &str = "code.shared-sessions";
 
 struct RunSettings {
     enabled: bool,
     timeout: Option<Duration>,
     interpreters: Vec<String>,
     trusted: Vec<String>,
+    shared_sessions: bool,
 }
 
 fn list_setting(settings: &crate::config::Settings, key: &str) -> Vec<String> {
@@ -514,6 +567,10 @@ fn run_settings(app: &tauri::AppHandle, label: &str) -> Result<RunSettings, AppE
         timeout,
         interpreters: list_setting(settings, INTERPRETERS_KEY),
         trusted: list_setting(settings, TRUSTED_KEY),
+        shared_sessions: settings
+            .get(SESSIONS_KEY)
+            .and_then(ConfigValue::as_bool)
+            .unwrap_or(true),
     })
 }
 
@@ -529,11 +586,15 @@ pub struct RunOptions {
     timeout_seconds: Option<f64>,
     /// Ask tools to colour their output although it isn't a terminal.
     color: bool,
+    /// Run on its own, outside the note's shared session.
+    fresh: bool,
+    /// The note's path: blocks with the same key share a session.
+    session_key: Option<String>,
 }
 
 /// Environment that makes common tools emit colour when stdout is a pipe:
 /// Node/chalk, BSD `ls`, pytest, git, and anything that checks TERM.
-const COLOR_ENV: &[(&str, &str)] = &[
+pub(crate) const COLOR_ENV: &[(&str, &str)] = &[
     ("TERM", "xterm-256color"),
     ("FORCE_COLOR", "1"),
     ("CLICOLOR", "1"),
@@ -589,8 +650,13 @@ fn run_timeout(options: &RunOptions, setting: Option<Duration>) -> Option<Durati
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum RunStart {
-    Started,
-    NeedsTrust { folder: String },
+    /// `shared`: the block ran in the note's session.
+    Started {
+        shared: bool,
+    },
+    NeedsTrust {
+        folder: String,
+    },
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -726,6 +792,7 @@ pub fn run_code(
     options: Option<RunOptions>,
     on_event: Channel<RunEvent>,
     registry: State<'_, Arc<RunRegistry>>,
+    sessions: State<'_, Arc<super::session::Sessions>>,
 ) -> Result<RunStart, AppError> {
     let options = options.unwrap_or_default();
     let settings = run_settings(&app, webview.label())?;
@@ -768,6 +835,37 @@ pub fn run_code(
         None => code,
     };
     let code = sudo_reads_stdin(runtime.id, code);
+
+    if let Some(note) = options.session_key.as_deref().filter(|_| {
+        settings.shared_sessions
+            && !options.fresh
+            && super::session::SESSION_RUNTIMES.contains(&runtime.id)
+    }) {
+        let sink: Sink = Arc::new(move |event| {
+            let _ = on_event.send(event);
+        });
+        sessions.run_block(
+            registry.inner(),
+            (webview.label().to_owned(), note.to_owned()),
+            runtime.id,
+            runtime.label,
+            &program_path,
+            cwd.as_deref().map(Path::new),
+            path,
+            super::session::BlockRun {
+                id: run_id,
+                code,
+                // The session starts in the note's folder; `cwd=` moves it.
+                cd: options.dir.is_some().then(|| run_dir.clone()).flatten(),
+                color: options.color,
+                timeout: run_timeout(&options, settings.timeout),
+                sink,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                timed_out: Arc::new(AtomicBool::new(false)),
+            },
+        )?;
+        return Ok(RunStart::Started { shared: true });
+    }
     let temp_dir = match tool.source {
         Source::Inline => None,
         Source::File(ext) | Source::Compile(ext) => Some(write_source(&run_id, ext, &code)?),
@@ -812,9 +910,16 @@ pub fn run_code(
     registry.0.lock().insert(
         run_id.clone(),
         RunHandle {
-            pid,
+            group: pid,
             cancelled: cancelled.clone(),
-            stdin: Arc::new(Mutex::new(child.stdin.take())),
+            stdin: Arc::new(Mutex::new({
+                let mut slot = StdinSlot::default();
+                if let Some(pipe) = child.stdin.take() {
+                    slot.attach(Box::new(pipe));
+                }
+                slot
+            })),
+            stop: Arc::new(move || kill_group(pid)),
         },
     );
 
@@ -902,18 +1007,14 @@ pub fn run_code(
             cancelled: cancelled.load(Ordering::Relaxed),
             truncated: truncated.load(Ordering::Relaxed),
             timed_out: timed_out.load(Ordering::Relaxed),
+            session_ended: false,
         });
     });
 
-    Ok(RunStart::Started)
+    Ok(RunStart::Started { shared: false })
 }
 
-/// The input pipe of a live run. Cloned out so a write that blocks (the
-/// program isn't reading) never holds the registry lock.
-fn run_stdin(
-    registry: &RunRegistry,
-    run_id: &str,
-) -> Option<Arc<Mutex<Option<std::process::ChildStdin>>>> {
+fn run_stdin(registry: &RunRegistry, run_id: &str) -> Option<Arc<Mutex<StdinSlot>>> {
     registry
         .0
         .lock()
@@ -922,30 +1023,80 @@ fn run_stdin(
 }
 
 /// Send text (usually a typed line plus "\n") to a running block's input.
+/// The slot is cloned out first, so a write that blocks (the program isn't
+/// reading) never holds the registry lock Stop needs.
 #[tauri::command(async)]
 pub fn write_run_stdin(
     run_id: String,
     text: String,
     registry: State<'_, Arc<RunRegistry>>,
 ) -> Result<(), AppError> {
-    use std::io::Write;
     let stdin = run_stdin(&registry, &run_id)
         .ok_or_else(|| AppError::Message("This run has already finished".into()))?;
-    let mut guard = stdin.lock();
-    let pipe = guard
-        .as_mut()
-        .ok_or_else(|| AppError::Message("Input was already ended for this run".into()))?;
-    pipe.write_all(text.as_bytes())
-        .and_then(|()| pipe.flush())
-        .map_err(|e| AppError::Message(format!("The program stopped reading input ({e})")))
+    let result = stdin.lock().write(text.as_bytes());
+    result.map_err(|e| AppError::Message(format!("The program isn't reading input ({e})")))
 }
 
 /// End a running block's input (the program reads end-of-file), like ⌃D.
 #[tauri::command]
 pub fn close_run_stdin(run_id: String, registry: State<'_, Arc<RunRegistry>>) {
     if let Some(stdin) = run_stdin(&registry, &run_id) {
-        stdin.lock().take();
+        stdin.lock().close();
     }
+}
+
+/// End a window's shared sessions: one note's, or all of them. Returns how
+/// many were ended.
+#[tauri::command]
+pub fn end_code_sessions(
+    webview: tauri::Webview,
+    note_path: Option<String>,
+    sessions: State<'_, Arc<super::session::Sessions>>,
+) -> usize {
+    sessions.end(webview.label(), note_path.as_deref())
+}
+
+/// Runtimes with a live session for a note (for "Restart Code Sessions").
+#[tauri::command]
+pub fn code_session_runtimes(
+    webview: tauri::Webview,
+    note_path: String,
+    sessions: State<'_, Arc<super::session::Sessions>>,
+) -> Vec<&'static str> {
+    sessions.runtimes_for(webview.label(), &note_path)
+}
+
+/// Remove temp folders left by runs and sessions of a Writer that was killed
+/// rather than quit (its sessions exit on their own: their control pipe
+/// closes). Only folders older than `max_age`, so live ones are never touched.
+pub fn sweep_stale_temp(dir: &Path, max_age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            (name.starts_with("writer-session-") || name.starts_with("writer-run-"))
+                && entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > max_age)
+        })
+        .filter(|entry| std::fs::remove_dir_all(entry.path()).is_ok())
+        .count()
+}
+
+/// Kill every run and session: runs live in their own process groups, so
+/// they would outlive the app otherwise.
+pub fn shutdown(registry: &RunRegistry, sessions: &super::session::Sessions) {
+    for handle in registry.0.lock().values() {
+        kill_group(handle.group);
+    }
+    sessions.end_all();
 }
 
 /// `sudo` needs a terminal for its password prompt; `-S` makes it read the
@@ -968,9 +1119,12 @@ fn sudo_reads_stdin(runtime_id: &str, code: String) -> String {
 
 #[tauri::command]
 pub fn cancel_run(run_id: String, registry: State<'_, Arc<RunRegistry>>) {
-    if let Some(handle) = registry.0.lock().get(&run_id) {
+    let stop = registry.0.lock().get(&run_id).map(|handle| {
         handle.cancelled.store(true, Ordering::Relaxed);
-        kill_group(handle.pid);
+        handle.stop.clone()
+    });
+    if let Some(stop) = stop {
+        stop();
     }
 }
 
@@ -1039,7 +1193,13 @@ mod tests {
         // these were workspace-scoped, opening a cloned repo could enable
         // running or swap in its own interpreter.
         let schema = crate::config::settings_schema();
-        for key in [ENABLED_KEY, TIMEOUT_KEY, INTERPRETERS_KEY, TRUSTED_KEY] {
+        for key in [
+            ENABLED_KEY,
+            TIMEOUT_KEY,
+            INTERPRETERS_KEY,
+            TRUSTED_KEY,
+            SESSIONS_KEY,
+        ] {
             let def = schema.iter().find(|d| d.key == key).expect(key);
             assert_eq!(
                 def.scope,
@@ -1189,22 +1349,21 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_program_reads_what_is_written_to_its_stdin() {
-        use std::io::{Read, Write};
+        use std::io::Read;
         let mut child = Command::new("/bin/sh")
             .args(["-c", "read name; echo \"hi $name\"; cat"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        let stdin = Arc::new(Mutex::new(child.stdin.take()));
-        stdin
-            .lock()
-            .as_mut()
-            .unwrap()
-            .write_all(b"Diaa\nrest")
-            .unwrap();
+        let mut slot = StdinSlot::default();
+        // Typed before the pipe is attached: held, then flushed on attach.
+        slot.write(b"Diaa\n").unwrap();
+        slot.attach(Box::new(child.stdin.take().unwrap()));
+        slot.write(b"rest").unwrap();
         // Ending input (dropping the pipe) lets `cat` finish.
-        stdin.lock().take();
+        slot.close();
+        assert!(slot.write(b"late").is_err());
         let mut out = String::new();
         child
             .stdout
@@ -1214,6 +1373,21 @@ mod tests {
             .unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(out, "hi Diaa\nrest");
+    }
+
+    #[test]
+    fn stale_temp_folders_are_swept_and_fresh_ones_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["writer-session-old", "writer-run-new", "someone-elses"] {
+            std::fs::create_dir(tmp.path().join(name)).unwrap();
+        }
+        let old = std::fs::File::open(tmp.path().join("writer-session-old")).unwrap();
+        old.set_modified(std::time::SystemTime::now() - Duration::from_secs(3 * 86_400))
+            .unwrap();
+        assert_eq!(sweep_stale_temp(tmp.path(), Duration::from_secs(86_400)), 1);
+        assert!(!tmp.path().join("writer-session-old").exists());
+        assert!(tmp.path().join("writer-run-new").exists());
+        assert!(tmp.path().join("someone-elses").exists());
     }
 
     #[test]

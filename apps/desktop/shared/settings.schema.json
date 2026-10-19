@@ -406,6 +406,15 @@
       "default": []
     },
     {
+      "key": "code.shared-sessions",
+      "label": "Shared Sessions",
+      "description": "Blocks in the same note share one live session per language (bash, zsh, sh, Python), so a block sees the variables, functions, imports and folder left by the blocks run before it. Add fresh after a block's language to run it on its own.",
+      "category": "Code",
+      "type": "boolean",
+      "scope": "global",
+      "default": true
+    },
+    {
       "key": "code.trusted-folders",
       "label": "Trusted Folders",
       "description": "Folders where code blocks may run. Writer asks the first time you run code in a new workspace (or, for a file opened on its own, its folder) and adds it here. Remove an entry to be asked again.",

@@ -310,17 +310,30 @@ export type RunEvent =
   | { event: "stderr"; data: string }
   | {
       event: "exit";
-      data: { code: number | null; cancelled: boolean; truncated: boolean; timedOut: boolean };
+      data: {
+        code: number | null;
+        cancelled: boolean;
+        truncated: boolean;
+        timedOut: boolean;
+        /** The block's shared session ended with it; the next run starts anew. */
+        sessionEnded: boolean;
+      };
     };
 
 /** `needsTrust`: nothing ran, because `folder` isn't in Trusted Folders yet. */
-export type RunStart = { status: "started" } | { status: "needsTrust"; folder: string };
+export type RunStart =
+  | { status: "started"; shared: boolean }
+  | { status: "needsTrust"; folder: string };
 
 /** Per-block options from the fence's info string (see `parseFenceOptions`). */
 export interface RunOptions {
   dir?: string;
   timeoutSeconds?: number;
   color: boolean;
+  /** Run on its own instead of in the note's shared session. */
+  fresh: boolean;
+  /** The note's path: blocks with the same key share a session. */
+  sessionKey?: string;
 }
 
 export function runCode(
@@ -348,4 +361,9 @@ export function writeRunStdin(runId: string, text: string): Promise<void> {
 /** End a running block's input: the program reads end-of-file. */
 export function closeRunStdin(runId: string): Promise<void> {
   return invoke("close_run_stdin", { runId });
+}
+
+/** End this window's shared code sessions: one note's, or all. */
+export function endCodeSessions(notePath: string | null): Promise<number> {
+  return invoke("end_code_sessions", { notePath });
 }

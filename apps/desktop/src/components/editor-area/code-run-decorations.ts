@@ -21,11 +21,13 @@ import {
 import type { SyntaxNode } from "@lezer/common";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import runtimes from "@shared/code-runtimes.json";
+import sessionRuntimes from "@shared/code-session-runtimes.json";
 import { getParentDir } from "@/lib/paths";
 import { useSettingsStore } from "@/stores/settings-store";
 import {
   cancelRun,
   closeRunStdin,
+  endCodeSessions,
   runCode,
   type RunEvent,
   type RunOptions,
@@ -90,6 +92,10 @@ interface Session {
   /** While `needs-trust`: the folder to allow, and how to start once allowed. */
   trustFolder: string | null;
   launch: () => void;
+  /** Ran in the note's shared session for its language. */
+  shared: boolean;
+  /** Its session ended with it (Stop on a shell, `exit`, a crash). */
+  sessionEnded: boolean;
 }
 
 /** Running, or waiting for the user to allow its folder. */
@@ -147,6 +153,7 @@ function finishSession(
         ? "done"
         : "failed";
   session.exitCode = exit.code;
+  session.sessionEnded = exit.sessionEnded;
   session.endedAt = performance.now();
   session.settle(session.status);
   notify(view, session);
@@ -247,12 +254,14 @@ export interface FenceOptions extends RunOptions {
   skip: boolean;
 }
 
+const SESSION_RUNTIMES: readonly string[] = sessionRuntimes;
+
 const OPTION_PATTERN = /([A-Za-z][\w-]*)(?:=("[^"]*"|'[^']*'|\S+))?/g;
 
 /** Read the options; unknown words are ignored, since other tools put titles
  *  and flags in the info string too. */
 export function parseFenceOptions(info: string): FenceOptions {
-  const options: FenceOptions = { color: false, skip: false };
+  const options: FenceOptions = { color: false, skip: false, fresh: false };
   const afterLang = info.trim().replace(/^\S+/, "");
   for (const [, rawKey, rawValue] of afterLang.matchAll(OPTION_PATTERN)) {
     const key = rawKey.toLowerCase();
@@ -266,6 +275,8 @@ export function parseFenceOptions(info: string): FenceOptions {
       options.color = true;
     } else if (key === "skip" && value === undefined) {
       options.skip = true;
+    } else if (key === "fresh" && value === undefined) {
+      options.fresh = true;
     }
   }
   return options;
@@ -331,7 +342,13 @@ function notify(view: EditorView, session: Session): void {
 
 function declineTrust(view: EditorView, session: Session): void {
   session.trustFolder = null;
-  finishSession(view, session, { code: null, cancelled: true, truncated: false, timedOut: false });
+  finishSession(view, session, {
+    code: null,
+    cancelled: true,
+    truncated: false,
+    timedOut: false,
+    sessionEnded: false,
+  });
 }
 
 async function allowTrust(view: EditorView, session: Session): Promise<void> {
@@ -353,6 +370,7 @@ async function allowTrust(view: EditorView, session: Session): Promise<void> {
       cancelled: false,
       truncated: false,
       timedOut: false,
+      sessionEnded: false,
     });
     return;
   }
@@ -386,6 +404,8 @@ function startRun(view: EditorView, fence: RunnableFence): Session {
     settle,
     trustFolder: null,
     launch: () => {},
+    shared: false,
+    sessionEnded: false,
   };
   sessions.set(id, session);
   // Replacing the fence's mark retires its previous session (see runLifecycle).
@@ -399,10 +419,18 @@ function startRun(view: EditorView, fence: RunnableFence): Session {
     else appendChunk(session, event.event, event.data);
   };
   session.launch = () => {
-    const { dir, timeoutSeconds, color } = fence.options;
-    runCode(id, fence.lang, fence.source, cwd, { dir, timeoutSeconds, color }, onEvent)
+    const { dir, timeoutSeconds, color, fresh } = fence.options;
+    const options = { dir, timeoutSeconds, color, fresh, sessionKey: filePath || undefined };
+    runCode(id, fence.lang, fence.source, cwd, options, onEvent)
       .then((start) => {
-        if (start.status !== "needsTrust" || session.status !== "running") return;
+        if (start.status === "started") {
+          if (start.shared !== session.shared) {
+            session.shared = start.shared;
+            notify(view, session);
+          }
+          return;
+        }
+        if (session.status !== "running") return;
         session.status = "needs-trust";
         session.trustFolder = start.folder;
         notify(view, session);
@@ -417,6 +445,7 @@ function startRun(view: EditorView, fence: RunnableFence): Session {
       cancelled: false,
       truncated: false,
       timedOut: false,
+      sessionEnded: false,
     });
   };
   session.launch();
@@ -483,6 +512,21 @@ async function runSequence(view: EditorView, positions: number[]): Promise<void>
   } finally {
     running.delete(batch);
   }
+}
+
+/** Whether the note has blocks that run in a shared session (palette's
+ *  "Restart Code Sessions"). */
+export function hasSessionBlocks(state: EditorState): boolean {
+  return runnableFenceStarts(state).some((pos) => {
+    const fence = runnableFenceAt(state, pos);
+    return !!fence && !fence.options.fresh && SESSION_RUNTIMES.includes(fence.lang);
+  });
+}
+
+/** End the note's shared sessions: the next run starts each one anew. */
+export function restartCodeSessions(view: EditorView): void {
+  const notePath = view.state.facet(filePathFacet)();
+  if (notePath) void endCodeSessions(notePath);
 }
 
 export type RunScope = "all" | "above";
@@ -634,6 +678,12 @@ class RunToggleWidget extends WidgetType {
 }
 
 function statusText(session: Session, now: number): string {
+  const base = baseStatusText(session, now);
+  if (session.sessionEnded) return `${base} · session ended`;
+  return session.shared ? `${base} · session` : base;
+}
+
+function baseStatusText(session: Session, now: number): string {
   const elapsed = formatDuration((session.endedAt ?? now) - session.startedAt);
   switch (session.status) {
     case "running":
@@ -895,6 +945,9 @@ const runLifecycle = ViewPlugin.define((view) => ({
   destroy() {
     deadViews.add(view);
     for (const batch of batches.get(view) ?? []) batch.cancelled = true;
+    // The note's shared sessions go with its editor (tab closed).
+    const notePath = view.state.facet(filePathFacet)();
+    if (notePath) void endCodeSessions(notePath).catch(() => {});
     view.state.field(runsField).between(0, view.state.doc.length, (_from, _to, mark) => {
       dropSession(mark.id);
     });

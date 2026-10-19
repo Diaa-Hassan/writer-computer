@@ -509,10 +509,18 @@ pub fn run() {
     builder
         .manage(AppState::new())
         .manage(std::sync::Arc::new(commands::run::RunRegistry::default()))
+        .manage(std::sync::Arc::new(commands::session::Sessions::default()))
         .setup(|app| {
             // Initialize the main window's per-window state (settings layer,
             // pending-open queue). `get_or_create` lazily builds the
             // `WorkspaceState` for the `"main"` label.
+            // Off the startup path: folders a killed Writer left behind.
+            std::thread::spawn(|| {
+                commands::run::sweep_stale_temp(
+                    &std::env::temp_dir(),
+                    std::time::Duration::from_secs(24 * 60 * 60),
+                );
+            });
             let main_state = app.state::<AppState>().get_or_create(MAIN_WINDOW_LABEL);
             init_window_settings(app.handle(), &main_state)?;
 
@@ -615,6 +623,8 @@ pub fn run() {
             commands::run::cancel_run,
             commands::run::write_run_stdin,
             commands::run::close_run_stdin,
+            commands::run::end_code_sessions,
+            commands::run::code_session_runtimes,
             telemetry::telemetry_should_prompt,
             telemetry::telemetry_mark_prompted,
             telemetry::telemetry_report_declined,
@@ -629,6 +639,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
+            // Runs and sessions live in their own process groups; without this
+            // they would outlive the app.
+            if let RunEvent::Exit = &_event {
+                commands::run::shutdown(
+                    &_app.state::<std::sync::Arc<commands::run::RunRegistry>>(),
+                    &_app.state::<std::sync::Arc<commands::session::Sessions>>(),
+                );
+            }
             // Dock click with every window hidden or closed: bring the main
             // window back. It is only ever hidden (never destroyed) by the
             // close-requested handler, so it still holds its workspace.
