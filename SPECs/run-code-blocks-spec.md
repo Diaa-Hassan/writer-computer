@@ -28,6 +28,15 @@ A ` ```bash ` fence gets a **▶ Run** pill in its top-right corner. Clicking it
 | `c`                          | `cc`, `gcc`, `clang` (with `-lm`)                  | compiled: `main.c` → `main`, then run                                                                        |
 | `cpp` (`c++`, `cxx`)         | `c++`, `g++`, `clang++` (with `-std=c++17`)        | compiled: `main.cpp` → `main`, then run                                                                      |
 | `rust` (`rs`)                | `rustc --edition 2021`                             | compiled: `main.rs` → `main`, then run                                                                       |
+| `julia` (`jl`)               | `julia -e`                                         | inline                                                                                                       |
+| `elixir` (`ex`, `exs`)       | `elixir -e`                                        | inline                                                                                                       |
+| `dart`                       | `dart run`                                         | temp file `main.dart`                                                                                        |
+| `haskell` (`hs`)             | `runghc`, `runhaskell`                             | temp file `main.hs`                                                                                          |
+| `clojure` (`clj`)            | `bb` (Babashka), `clojure -M`                      | temp file `main.clj`                                                                                         |
+| `fish`                       | `fish -c`                                          | inline                                                                                                       |
+| `nushell` (`nu`)             | `nu -c`                                            | inline                                                                                                       |
+| `tcl`                        | `tclsh`                                            | temp file `main.tcl`                                                                                         |
+| `sql` (`sqlite`)             | `sqlite3 -header -column :memory:`                 | inline: the block is run against a fresh in-memory SQLite database                                           |
 
 **Compiled languages** run as one `/bin/sh -c 'src=$1; out=$2; shift 2; "$0" "$src" -o "$out" "$@" && exec "$out"' <compiler> main.c main <flags>`: a compile error is the run's stderr and exit code, and on success the shell is replaced by the program. Both steps share the run's process group, so Stop and the time limit cover the compiler too. Every run also gets `DOTNET_NOLOGO=1` so dotnet's first-run banner stays out of the output.
 
@@ -47,7 +56,7 @@ Known limits: Ruby, Perl and Lua buffer output when it isn't a terminal, so thei
 - **Working directory:** the note's folder. Falls back to the app's working directory when the note has no path or the folder is gone.
 - **Environment:** the app's environment with `PATH` replaced by the login shell's (see Languages). No stdin: a block that reads input gets end-of-file.
 - **Run control:** a quiet `▶ Run` pill floated into the fence's first line (the hidden ```marker line), so it sits in the block's top-right corner. While running it becomes an accent-tinted`■ Stop`. **⌥↵** (Alt+Enter) runs or stops the runnable block containing the caret; it falls through when the caret isn't in one.
-- **Output tray:** appears only after the first run, attached to the block's bottom edge (the last code line loses its bottom radius, the tray continues the code surface with a hairline divider). Header: status dot + text — `Running · 3.2s` (pulsing accent dot, live timer; no pulse under reduced motion), `Done · 120ms` (green), `Exit 2 · 40ms` (red), `Stopped · 4.1s` — and actions Copy output, Run again (hidden while running) and Clear (removes the tray; stops the run if it is still going). Body: stdout, stderr in red, terminal escape codes stripped (a code split across reads is held back until complete), `No output` when the run printed nothing. The body caps at 22em and scrolls; it follows new output only while scrolled to the bottom.
+- **Output tray:** appears only after the first run, attached to the block's bottom edge (the last code line loses its bottom radius, the tray continues the code surface with a hairline divider). Header: status dot + text — `Running · 3.2s` (pulsing accent dot, live timer; no pulse under reduced motion), `Done · 120ms` (green), `Exit 2 · 40ms` (red), `Stopped · 4.1s` — and actions Copy output, Run again (hidden while running) and Clear (removes the tray; stops the run if it is still going). Body: stdout, stderr in red, terminal colours drawn (see Colours), `No output` when the run printed nothing. The body caps at 22em and scrolls; it follows new output only while scrolled to the bottom.
 - **Output lifetime:** kept in memory, never written to the note. It belongs to the fence, not to the widget DOM: the fence's start carries a mark (a `RangeSet` in editor state, mapped through edits) holding the id of its latest run, so output survives edits and scrolling the block out of view. Re-running replaces it. The run is stopped and its output dropped when the mark goes away: the fence is deleted, Clear is pressed, the editor reuses the tab for another document, or the tab is closed. Switching tabs does not: inactive tabs stay mounted, so their runs continue.
 - **Stop** kills the run's whole process group (`SIGKILL`), so children such as `sleep` stop too.
 - **Limits:** a run that prints more than 1 MiB (stdout + stderr) is stopped and the panel says so.
@@ -76,6 +85,21 @@ All three are `"scope": "global"`, and a Rust test fails if that ever changes. W
 - Trusted Folders is editable in Settings → Code; removing an entry makes Writer ask again.
 - Single-entry list settings: the config file writes a list as one `key = value` line per item, so a one-item list used to read back from disk as a string and the trust check saw no folders. The parser now uses the schema default's type (`List`) to keep it a list; this also fixes one-entry Interpreters and File Associations.
 
+## Block options
+
+Words after the language in the info string, parsed by the editor (`parseFenceOptions`); anything else (titles, `{1,3}`, other tools' flags) is ignored:
+
+| Option                  | Effect                                                                                                                                                                                                                                                                                                                             |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cwd=<dir>` (or `dir=`) | Run in that folder: absolute, `~/…`, or relative to the note's folder. Quotes allow spaces (`cwd="my app"`). A folder that doesn't exist, or a relative path in a never-saved note, is reported in the tray. Trust is still decided for the note's folder: `cwd=` only moves where allowed code runs (the code could `cd` anyway). |
+| `timeout=<seconds>`     | This block's time limit, overriding Settings → Run Time Limit; `0` means none. `30s` is accepted.                                                                                                                                                                                                                                  |
+| `color` (`colour`)      | Sets `TERM=xterm-256color`, `FORCE_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `PY_COLORS` and git's `color.ui=always` (via `GIT_CONFIG_*`), so tools that check for a terminal colour their output anyway.                                                                                                                              |
+| `skip`                  | Run All passes this block by; its own Run button still works.                                                                                                                                                                                                                                                                      |
+
+## Colours
+
+`ansi.ts` turns output into styled segments: SGR codes give the 16 palette colours (theme-tuned variables `--ansi-0…15`, separate light and dark palettes so "white" stays readable on light), 256-colour and truecolor (inline `rgb()`), bold, dim, italic, underline and inverse. Every other escape (cursor moves, line clears, OSC titles and links) and stray ESC characters are dropped. Style carries across chunks, and an escape cut off at a read boundary is held until its end arrives. Copy output copies the plain text.
+
 ## Design
 
 - `shared/code-runtimes.json` maps every fence language and alias → runtime id. The editor reads it to decide where to show Run and sends the id; `RUNTIMES` in `commands/run.rs` holds each runtime's tools. A test checks every mapped id exists and every runtime is reachable under its own name.
@@ -92,6 +116,6 @@ Add a `Runtime` to `RUNTIMES` in `commands/run.rs` (its tools, each `inline(prog
 ## Non-goals (this version)
 
 - Shared state between blocks, variables across blocks or languages.
-- Interactive stdin, a terminal/TTY, rendering colours (escape codes are stripped, not drawn).
+- Interactive stdin, a terminal/TTY (programs see a pipe; `color` covers the common colour switches), carriage-return progress bars redrawing in place.
 - Saving output into the note.
 - Running from Reading/preview surfaces other than the editor.

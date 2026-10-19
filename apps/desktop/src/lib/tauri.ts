@@ -316,16 +316,24 @@ export type RunEvent =
 /** `needsTrust`: nothing ran, because `folder` isn't in Trusted Folders yet. */
 export type RunStart = { status: "started" } | { status: "needsTrust"; folder: string };
 
+/** Per-block options from the fence's info string (see `parseFenceOptions`). */
+export interface RunOptions {
+  dir?: string;
+  timeoutSeconds?: number;
+  color: boolean;
+}
+
 export function runCode(
   runId: string,
   lang: string,
   code: string,
   cwd: string | null,
+  options: RunOptions,
   onEvent: (event: RunEvent) => void,
 ): Promise<RunStart> {
   const channel = new Channel<RunEvent>();
   channel.onmessage = onEvent;
-  return invoke("run_code", { runId, lang, code, cwd, onEvent: channel });
+  return invoke("run_code", { runId, lang, code, cwd, options, onEvent: channel });
 }
 
 export function cancelRun(runId: string): Promise<void> {

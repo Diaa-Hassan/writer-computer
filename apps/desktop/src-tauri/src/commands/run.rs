@@ -250,6 +250,53 @@ const RUNTIMES: &[Runtime] = &[
         label: "Rust",
         tools: &[compile("rustc", &["--edition", "2021"], "rs")],
     },
+    Runtime {
+        id: "julia",
+        label: "Julia",
+        tools: &[inline("julia", &["-e"])],
+    },
+    Runtime {
+        id: "elixir",
+        label: "Elixir",
+        tools: &[inline("elixir", &["-e"])],
+    },
+    Runtime {
+        id: "dart",
+        label: "Dart",
+        tools: &[file("dart", &["run"], "dart")],
+    },
+    Runtime {
+        id: "haskell",
+        label: "Haskell",
+        tools: &[file("runghc", &[], "hs"), file("runhaskell", &[], "hs")],
+    },
+    Runtime {
+        id: "clojure",
+        label: "Clojure",
+        // Babashka starts in milliseconds; the JVM clojure CLI is the fallback.
+        tools: &[file("bb", &[], "clj"), file("clojure", &["-M"], "clj")],
+    },
+    Runtime {
+        id: "fish",
+        label: "fish",
+        tools: &[inline("fish", &["-c"])],
+    },
+    Runtime {
+        id: "nushell",
+        label: "Nushell",
+        tools: &[inline("nu", &["-c"])],
+    },
+    Runtime {
+        id: "tcl",
+        label: "Tcl",
+        tools: &[file("tclsh", &[], "tcl")],
+    },
+    Runtime {
+        id: "sql",
+        label: "SQL",
+        // An in-memory SQLite database per run; the block is the SQL to run.
+        tools: &[inline("sqlite3", &["-header", "-column", ":memory:"])],
+    },
 ];
 
 /// How long to wait for the login shell to report its PATH.
@@ -468,6 +515,73 @@ fn run_settings(app: &tauri::AppHandle, label: &str) -> Result<RunSettings, AppE
     })
 }
 
+/// Options written in the fence's info string (` ```bash cwd=../app timeout=30
+/// color `), parsed by the editor.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunOptions {
+    /// Folder to run in: absolute, `~/…`, or relative to the note's folder.
+    dir: Option<String>,
+    /// Seconds before the run is stopped; overrides the global time limit,
+    /// and 0 means no limit for this block.
+    timeout_seconds: Option<f64>,
+    /// Ask tools to colour their output although it isn't a terminal.
+    color: bool,
+}
+
+/// Environment that makes common tools emit colour when stdout is a pipe:
+/// Node/chalk, BSD `ls`, pytest, git, and anything that checks TERM.
+const COLOR_ENV: &[(&str, &str)] = &[
+    ("TERM", "xterm-256color"),
+    ("FORCE_COLOR", "1"),
+    ("CLICOLOR", "1"),
+    ("CLICOLOR_FORCE", "1"),
+    ("PY_COLORS", "1"),
+    ("GIT_CONFIG_COUNT", "1"),
+    ("GIT_CONFIG_KEY_0", "color.ui"),
+    ("GIT_CONFIG_VALUE_0", "always"),
+];
+
+/// The folder a `cwd=` option names, resolved against the note's folder.
+fn option_dir(dir: &str, note_dir: Option<&Path>) -> Result<PathBuf, AppError> {
+    let expanded = match dir
+        .strip_prefix("~/")
+        .or(if dir == "~" { Some("") } else { None })
+    {
+        Some(rest) => std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(rest))
+            .ok_or_else(|| AppError::Message("cwd=~: HOME isn't set".into()))?,
+        None => PathBuf::from(dir),
+    };
+    let path = if expanded.is_absolute() {
+        expanded
+    } else {
+        note_dir
+            .ok_or_else(|| {
+                AppError::Message(format!(
+                    "cwd={dir}: save the note first, or use an absolute path"
+                ))
+            })?
+            .join(expanded)
+    };
+    match std::fs::canonicalize(&path) {
+        Ok(found) if found.is_dir() => Ok(found),
+        _ => Err(AppError::Message(format!(
+            "cwd={dir}: {} isn't a folder",
+            path.display()
+        ))),
+    }
+}
+
+/// The time limit for a run: the block's own, else the global setting.
+fn run_timeout(options: &RunOptions, setting: Option<Duration>) -> Option<Duration> {
+    match options.timeout_seconds {
+        Some(secs) if secs.is_finite() && secs > 0.0 => Some(Duration::from_secs_f64(secs)),
+        Some(0.0) => None,
+        _ => setting,
+    }
+}
+
 /// What run_code did: started the run, or declined because the folder hasn't
 /// been trusted yet (the editor asks, adds it to Trusted Folders, retries).
 #[derive(Serialize)]
@@ -607,9 +721,11 @@ pub fn run_code(
     lang: String,
     code: String,
     cwd: Option<String>,
+    options: Option<RunOptions>,
     on_event: Channel<RunEvent>,
     registry: State<'_, Arc<RunRegistry>>,
 ) -> Result<RunStart, AppError> {
+    let options = options.unwrap_or_default();
     let settings = run_settings(&app, webview.label())?;
     if !settings.enabled {
         return Err(AppError::Message(
@@ -631,6 +747,12 @@ pub fn run_code(
             });
         }
     }
+    // Trust was decided for the note's folder above; `cwd=` only moves where
+    // the already-allowed code runs.
+    let run_dir = match options.dir.as_deref() {
+        Some(dir) => Some(option_dir(dir, cwd.as_deref().map(Path::new))?),
+        None => cwd.as_deref().map(PathBuf::from),
+    };
     let runtime =
         runtime(&lang).ok_or_else(|| AppError::Unsupported(format!("no runtime for `{lang}`")))?;
     let path = user_path();
@@ -662,10 +784,11 @@ pub fn run_code(
     command
         .env("PATH", path)
         .envs(RUN_ENV.iter().copied())
+        .envs(if options.color { COLOR_ENV } else { &[] }.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(dir) = cwd.as_deref() {
+    if let Some(dir) = run_dir.as_deref() {
         command.current_dir(dir);
     }
     #[cfg(unix)]
@@ -751,7 +874,7 @@ pub fn run_code(
     // Time limit: a watchdog that kills the group unless the run ends first.
     let timed_out = Arc::new(AtomicBool::new(false));
     let (done_tx, done_rx) = mpsc::channel::<()>();
-    if let Some(limit) = settings.timeout {
+    if let Some(limit) = run_timeout(&options, settings.timeout) {
         let timed_out = timed_out.clone();
         std::thread::spawn(move || {
             if done_rx.recv_timeout(limit) == Err(mpsc::RecvTimeoutError::Timeout) {
@@ -943,6 +1066,45 @@ mod tests {
         assert!(err(&["go /usr/bin/go"]).contains("language=/path"));
         assert!(err(&["go=relative/go"]).contains("doesn't exist"));
         assert!(err(&["go=/no/such/go"]).contains("doesn't exist"));
+    }
+
+    #[test]
+    fn cwd_option_resolves_against_the_note_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = canonical(dir.path()).join("notes");
+        let app = canonical(dir.path()).join("app");
+        std::fs::create_dir_all(&note).unwrap();
+        std::fs::create_dir_all(&app).unwrap();
+
+        assert_eq!(option_dir("../app", Some(&note)).unwrap(), app);
+        assert_eq!(option_dir(app.to_str().unwrap(), None).unwrap(), app);
+        let missing = option_dir("../nope", Some(&note)).unwrap_err().to_string();
+        assert!(missing.contains("isn't a folder"), "{missing}");
+        let unsaved = option_dir("app", None).unwrap_err().to_string();
+        assert!(unsaved.contains("save the note first"), "{unsaved}");
+        if let Some(home) = std::env::var_os("HOME") {
+            assert_eq!(option_dir("~", None).unwrap(), canonical(Path::new(&home)));
+        }
+    }
+
+    #[test]
+    fn block_timeout_overrides_the_setting() {
+        let setting = Some(Duration::from_secs(60));
+        let with = |secs: Option<f64>| RunOptions {
+            timeout_seconds: secs,
+            ..Default::default()
+        };
+        assert_eq!(run_timeout(&with(None), setting), setting);
+        assert_eq!(
+            run_timeout(&with(Some(5.0)), setting),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(run_timeout(&with(Some(0.0)), setting), None, "0 = no limit");
+        assert_eq!(
+            run_timeout(&with(Some(-1.0)), setting),
+            setting,
+            "nonsense is ignored"
+        );
     }
 
     #[test]

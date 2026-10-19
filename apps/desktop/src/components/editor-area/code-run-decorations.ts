@@ -23,7 +23,8 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import runtimes from "@shared/code-runtimes.json";
 import { getParentDir } from "@/lib/paths";
 import { useSettingsStore } from "@/stores/settings-store";
-import { cancelRun, runCode, type RunEvent } from "@/lib/tauri";
+import { cancelRun, runCode, type RunEvent, type RunOptions } from "@/lib/tauri";
+import { type AnsiSegment, type AnsiStyle, parseAnsi, plainStyle, segmentCss } from "./ansi";
 import "./code-run.css";
 
 const runtimeByLang: Record<string, string> = runtimes;
@@ -38,26 +39,6 @@ export function runnableLang(info: string): string | null {
 // ---------------------------------------------------------------------------
 // Output cleanup and formatting
 // ---------------------------------------------------------------------------
-
-// CSI (colours, cursor moves), OSC (titles, links) and two-byte escapes.
-const ANSI_SOURCE =
-  "\\x1b\\[[0-?]*[ -/]*[@-~]|\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)|\\x1b[@-Z\\\\-_]";
-const ANSI_ALL = new RegExp(ANSI_SOURCE, "g");
-const ANSI_AT_START = new RegExp(`^(?:${ANSI_SOURCE})`);
-// A held-back tail longer than this isn't an escape sequence; let it through.
-const MAX_HELD_ESCAPE = 256;
-
-/**
- * Strip terminal escape codes from `text`. An escape sequence cut off by a
- * read boundary comes back as `rest`, to be prepended to the next chunk.
- */
-export function stripAnsi(text: string): { text: string; rest: string } {
-  const cut = text.lastIndexOf("\x1b");
-  if (cut !== -1 && text.length - cut <= MAX_HELD_ESCAPE && !ANSI_AT_START.test(text.slice(cut))) {
-    return { text: text.slice(0, cut).replace(ANSI_ALL, ""), rest: text.slice(cut) };
-  }
-  return { text: text.replace(ANSI_ALL, ""), rest: "" };
-}
 
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
@@ -75,7 +56,10 @@ type RunStatus = "running" | "needs-trust" | "done" | "failed" | "stopped" | "ti
 
 interface Chunk {
   stream: Stream;
+  /** Plain text, for Copy. */
   text: string;
+  /** The same text split by terminal style, for display. */
+  segments: AnsiSegment[];
 }
 
 interface Session {
@@ -86,6 +70,8 @@ interface Session {
   endedAt: number | null;
   chunks: Chunk[];
   held: Record<Stream, string>;
+  /** Terminal style in effect at the end of each stream so far. */
+  ansi: Record<Stream, AnsiStyle>;
   /** Called with a new chunk, or with nothing when the status changed. */
   listeners: Set<(chunk?: Chunk) => void>;
   /** Resolves with the final status once the run ends (or is dropped). */
@@ -105,10 +91,12 @@ const sessions = new Map<string, Session>();
 const deadViews = new WeakSet<EditorView>();
 
 function appendChunk(session: Session, stream: Stream, raw: string): void {
-  const { text, rest } = stripAnsi(session.held[stream] + raw);
+  const { segments, style, rest } = parseAnsi(session.held[stream] + raw, session.ansi[stream]);
   session.held[stream] = rest;
+  session.ansi[stream] = style;
+  const text = segments.map((segment) => segment.text).join("");
   if (!text) return;
-  const chunk = { stream, text };
+  const chunk = { stream, text, segments };
   session.chunks.push(chunk);
   for (const listener of session.listeners) listener(chunk);
 }
@@ -222,10 +210,42 @@ const filePathFacet = Facet.define<() => string, () => string>({
 // Fences
 // ---------------------------------------------------------------------------
 
+/** Options after the language in a fence's info string:
+ *  ` ```bash cwd=../app timeout=30 color skip `. */
+export interface FenceOptions extends RunOptions {
+  /** Run All passes this block by (its own Run button still works). */
+  skip: boolean;
+}
+
+const OPTION_PATTERN = /([A-Za-z][\w-]*)(?:=("[^"]*"|'[^']*'|\S+))?/g;
+
+/** Read the options; unknown words are ignored, since other tools put titles
+ *  and flags in the info string too. */
+export function parseFenceOptions(info: string): FenceOptions {
+  const options: FenceOptions = { color: false, skip: false };
+  const afterLang = info.trim().replace(/^\S+/, "");
+  for (const [, rawKey, rawValue] of afterLang.matchAll(OPTION_PATTERN)) {
+    const key = rawKey.toLowerCase();
+    const value = rawValue?.replace(/^(["'])(.*)\1$/, "$2");
+    if ((key === "cwd" || key === "dir") && value) {
+      options.dir = value;
+    } else if (key === "timeout" && value !== undefined) {
+      const seconds = Number(value.replace(/s$/, ""));
+      if (Number.isFinite(seconds) && seconds >= 0) options.timeoutSeconds = seconds;
+    } else if ((key === "color" || key === "colour") && value === undefined) {
+      options.color = true;
+    } else if (key === "skip" && value === undefined) {
+      options.skip = true;
+    }
+  }
+  return options;
+}
+
 interface RunnableFence {
   node: SyntaxNode;
   lang: string;
   source: string;
+  options: FenceOptions;
 }
 
 function runnableFence(state: EditorState, node: SyntaxNode): RunnableFence | null {
@@ -241,7 +261,7 @@ function runnableFence(state: EditorState, node: SyntaxNode): RunnableFence | nu
   const lang = runnableLang(info);
   // An unclosed fence is still being typed and runs to the end of the doc.
   if (!lang || marks < 2 || !source.trim()) return null;
-  return { node, lang, source };
+  return { node, lang, source, options: parseFenceOptions(info) };
 }
 
 /** The runnable fence containing `pos`, trying both sides of a boundary
@@ -329,6 +349,7 @@ function startRun(view: EditorView, fence: RunnableFence): Session {
     endedAt: null,
     chunks: [],
     held: { stdout: "", stderr: "" },
+    ansi: { stdout: plainStyle(), stderr: plainStyle() },
     listeners: new Set(),
     finished,
     settle,
@@ -347,7 +368,8 @@ function startRun(view: EditorView, fence: RunnableFence): Session {
     else appendChunk(session, event.event, event.data);
   };
   session.launch = () => {
-    runCode(id, fence.lang, fence.source, cwd, onEvent)
+    const { dir, timeoutSeconds, color } = fence.options;
+    runCode(id, fence.lang, fence.source, cwd, { dir, timeoutSeconds, color }, onEvent)
       .then((start) => {
         if (start.status !== "needsTrust" || session.status !== "running") return;
         session.status = "needs-trust";
@@ -415,8 +437,8 @@ async function runSequence(view: EditorView, positions: number[]): Promise<void>
       if (batch.cancelled || deadViews.has(view)) return;
       const pos = batch.positions[i];
       const fence = runnableFenceAt(view.state, pos);
-      // Deleted or no longer runnable since Run All started: skip it.
-      if (!fence || fence.node.from !== pos) continue;
+      // Deleted, no longer runnable, or marked `skip` since Run All started.
+      if (!fence || fence.node.from !== pos || fence.options.skip) continue;
       const existing = sessionAt(view.state, pos);
       let status: RunStatus;
       if (existing && isActive(existing)) {
@@ -437,7 +459,9 @@ export type RunScope = "all" | "above";
 /** Run every runnable block in the note (`all`), or those above the caret. */
 export function runCodeBlocks(view: EditorView, scope: RunScope): boolean {
   const before = scope === "above" ? view.state.selection.main.head : undefined;
-  const positions = runnableFenceStarts(view.state, before);
+  const positions = runnableFenceStarts(view.state, before).filter(
+    (pos) => !runnableFenceAt(view.state, pos)?.options.skip,
+  );
   if (positions.length === 0) return false;
   void runSequence(view, positions);
   return true;
@@ -689,10 +713,14 @@ class RunTrayWidget extends WidgetType {
     const appendOutput = (chunk: Chunk) => {
       // Follow the output only while the reader is already at the bottom.
       const pinned = output.scrollTop + output.clientHeight >= output.scrollHeight - 4;
-      const span = document.createElement("span");
-      span.className = `cm-code-run-${chunk.stream}`;
-      span.textContent = chunk.text;
-      output.append(span);
+      for (const segment of chunk.segments) {
+        const span = document.createElement("span");
+        const { className, css } = segmentCss(segment.style);
+        span.className = `cm-code-run-${chunk.stream} ${className}`.trim();
+        if (css) span.style.cssText = css;
+        span.textContent = segment.text;
+        output.append(span);
+      }
       if (pinned) output.scrollTop = output.scrollHeight;
     };
 

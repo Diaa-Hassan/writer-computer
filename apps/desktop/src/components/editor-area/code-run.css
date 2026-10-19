@@ -245,3 +245,63 @@
   outline: 1px solid var(--focus-border);
   outline-offset: 1px;
 }
+
+/* Terminal colours in output (ansi.ts). Palette slots 0–15 are theme-tuned
+   so "white" stays readable on light and "black" on dark; 256-colour and
+   truecolor values arrive as inline styles. */
+.cm-editor .cm-code-run-output {
+  --ansi-0: #383a42;
+  --ansi-1: #d0392f;
+  --ansi-2: #3f8f3e;
+  --ansi-3: #a86f00;
+  --ansi-4: #3a6fd8;
+  --ansi-5: #a626a4;
+  --ansi-6: #0b7fa7;
+  --ansi-7: #6f7277;
+  --ansi-8: #696c77;
+  --ansi-9: #ca1243;
+  --ansi-10: #4f9e4e;
+  --ansi-11: #b67600;
+  --ansi-12: #2f62c9;
+  --ansi-13: #9e2a9c;
+  --ansi-14: #0a7395;
+  --ansi-15: #4b4e55;
+  --ansi-inverse-fg: var(--bg-base);
+  --ansi-inverse-bg: var(--fg-base);
+}
+
+[data-theme="dark"] .cm-editor .cm-code-run-output {
+  --ansi-0: #5c6370;
+  --ansi-1: #e5636d;
+  --ansi-2: #8cc265;
+  --ansi-3: #e0b15c;
+  --ansi-4: #5aaef5;
+  --ansi-5: #c678dd;
+  --ansi-6: #4fbecc;
+  --ansi-7: #c8ccd4;
+  --ansi-8: #7f848e;
+  --ansi-9: #ff7a85;
+  --ansi-10: #a5e075;
+  --ansi-11: #f0c674;
+  --ansi-12: #73bfff;
+  --ansi-13: #de8cf5;
+  --ansi-14: #66d9e8;
+  --ansi-15: #eceff4;
+}
+
+.cm-editor .cm-ansi-bold {
+  font-weight: 600;
+}
+
+.cm-editor .cm-ansi-dim {
+  opacity: 0.65;
+}
+
+.cm-editor .cm-ansi-italic {
+  font-style: italic;
+}
+
+.cm-editor .cm-ansi-underline {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

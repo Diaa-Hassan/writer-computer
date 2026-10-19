@@ -27,9 +27,10 @@ const {
   formatDuration,
   runCodeBlocks,
   runnableFenceStarts,
+  parseFenceOptions,
   runnableLang,
-  stripAnsi,
 } = await import("../src/components/editor-area/code-run-decorations");
+const { plainStyle } = await import("../src/components/editor-area/ansi");
 
 function makeState(doc: string): EditorState {
   return withFullParse(
@@ -65,10 +66,14 @@ describe("runnableLang", () => {
     expect(runnableLang("C++")).toBe("cpp");
     expect(runnableLang("rs")).toBe("rust");
     expect(runnableLang("R")).toBe("r");
+    expect(runnableLang("jl")).toBe("julia");
+    expect(runnableLang("nu")).toBe("nushell");
+    expect(runnableLang("sqlite")).toBe("sql");
+    expect(runnableLang("clj")).toBe("clojure");
   });
 
   test("rejects languages without a runtime", () => {
-    expect(runnableLang("haskell")).toBeNull();
+    expect(runnableLang("cobol")).toBeNull();
     expect(runnableLang("")).toBeNull();
     expect(runnableLang("toString")).toBeNull();
   });
@@ -84,7 +89,7 @@ describe("code run decorations", () => {
   });
 
   test("other languages, unclosed fences and empty fences get nothing", () => {
-    expect(widgets(makeState("```haskell\nmain = print 1\n```"))).toEqual([]);
+    expect(widgets(makeState("```cobol\nDISPLAY 1.\n```"))).toEqual([]);
     expect(widgets(makeState("```bash\necho still typing"))).toEqual([]);
     expect(widgets(makeState("```bash\n\n```"))).toEqual([]);
   });
@@ -99,6 +104,7 @@ describe("code run decorations", () => {
       endedAt: 5,
       chunks: [],
       held: { stdout: "", stderr: "" },
+      ansi: { stdout: plainStyle(), stderr: plainStyle() },
       listeners: new Set(),
       finished: Promise.resolve("done"),
       settle: () => {},
@@ -122,18 +128,29 @@ describe("code run decorations", () => {
   });
 });
 
-describe("stripAnsi", () => {
-  test("removes colour and OSC sequences", () => {
-    expect(stripAnsi("\x1b[32mok\x1b[0m \x1b]0;title\x07done")).toEqual({
-      text: "ok done",
-      rest: "",
+describe("parseFenceOptions", () => {
+  test("reads cwd, timeout, color and skip after the language", () => {
+    expect(parseFenceOptions('bash cwd="../my app" timeout=30 color skip')).toEqual({
+      dir: "../my app",
+      timeoutSeconds: 30,
+      color: true,
+      skip: true,
+    });
+    expect(parseFenceOptions("py dir=~/proj timeout=2.5s")).toEqual({
+      dir: "~/proj",
+      timeoutSeconds: 2.5,
+      color: false,
+      skip: false,
     });
   });
 
-  test("holds back an escape cut off by a read boundary", () => {
-    const first = stripAnsi("plain \x1b[3");
-    expect(first).toEqual({ text: "plain ", rest: "\x1b[3" });
-    expect(stripAnsi(`${first.rest}1mred\x1b[0m`)).toEqual({ text: "red", rest: "" });
+  test("ignores the language, unknown words and bad values", () => {
+    expect(parseFenceOptions("skip")).toEqual({ color: false, skip: false });
+    expect(parseFenceOptions('bash title="skip this" {1,3} timeout=soon cwd=')).toEqual({
+      color: false,
+      skip: false,
+    });
+    expect(parseFenceOptions("bash timeout=-1 color=yes")).toEqual({ color: false, skip: false });
   });
 });
 
@@ -157,17 +174,19 @@ describe("Run All", () => {
   function fakeRuns(exitCodes: number[]): string[] {
     const ran: string[] = [];
     vi.mocked(tauri.runCode).mockReset();
-    vi.mocked(tauri.runCode).mockImplementation(async (_id, _lang, code, _cwd, onEvent) => {
-      ran.push(code.trim());
-      const exit = exitCodes.shift() ?? 0;
-      setTimeout(() =>
-        onEvent({
-          event: "exit",
-          data: { code: exit, cancelled: false, truncated: false, timedOut: false },
-        }),
-      );
-      return { status: "started" };
-    });
+    vi.mocked(tauri.runCode).mockImplementation(
+      async (_id, _lang, code, _cwd, _options, onEvent) => {
+        ran.push(code.trim());
+        const exit = exitCodes.shift() ?? 0;
+        setTimeout(() =>
+          onEvent({
+            event: "exit",
+            data: { code: exit, cancelled: false, truncated: false, timedOut: false },
+          }),
+        );
+        return { status: "started" };
+      },
+    );
     return ran;
   }
 
@@ -270,20 +289,22 @@ describe("Trusted Folders", () => {
   function fakeTrustingBackend(): string[] {
     const ran: string[] = [];
     vi.mocked(tauri.runCode).mockReset();
-    vi.mocked(tauri.runCode).mockImplementation(async (_id, _lang, code, _cwd, onEvent) => {
-      const trusted = useSettingsStore.getState().settings["code.trusted-folders"];
-      if (!(Array.isArray(trusted) && trusted.includes(folder))) {
-        return { status: "needsTrust", folder };
-      }
-      ran.push(code.trim());
-      setTimeout(() =>
-        onEvent({
-          event: "exit",
-          data: { code: 0, cancelled: false, truncated: false, timedOut: false },
-        }),
-      );
-      return { status: "started" };
-    });
+    vi.mocked(tauri.runCode).mockImplementation(
+      async (_id, _lang, code, _cwd, _options, onEvent) => {
+        const trusted = useSettingsStore.getState().settings["code.trusted-folders"];
+        if (!(Array.isArray(trusted) && trusted.includes(folder))) {
+          return { status: "needsTrust", folder };
+        }
+        ran.push(code.trim());
+        setTimeout(() =>
+          onEvent({
+            event: "exit",
+            data: { code: 0, cancelled: false, truncated: false, timedOut: false },
+          }),
+        );
+        return { status: "started" };
+      },
+    );
     return ran;
   }
 
@@ -339,17 +360,19 @@ describe("Trusted Folders", () => {
     const ran: string[] = [];
     let backendTrusts = false;
     vi.mocked(tauri.runCode).mockReset();
-    vi.mocked(tauri.runCode).mockImplementation(async (_id, _lang, code, _cwd, onEvent) => {
-      if (!backendTrusts) return { status: "needsTrust", folder };
-      ran.push(code.trim());
-      setTimeout(() =>
-        onEvent({
-          event: "exit",
-          data: { code: 0, cancelled: false, truncated: false, timedOut: false },
-        }),
-      );
-      return { status: "started" };
-    });
+    vi.mocked(tauri.runCode).mockImplementation(
+      async (_id, _lang, code, _cwd, _options, onEvent) => {
+        if (!backendTrusts) return { status: "needsTrust", folder };
+        ran.push(code.trim());
+        setTimeout(() =>
+          onEvent({
+            event: "exit",
+            data: { code: 0, cancelled: false, truncated: false, timedOut: false },
+          }),
+        );
+        return { status: "started" };
+      },
+    );
     const setSetting = vi.fn(async () => {
       backendTrusts = true;
     });
