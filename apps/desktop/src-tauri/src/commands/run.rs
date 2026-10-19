@@ -324,6 +324,8 @@ pub enum RunEvent {
 struct RunHandle {
     pid: u32,
     cancelled: Arc<AtomicBool>,
+    /// The program's input, until the user ends it (or the run ends).
+    stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
 }
 
 /// Live runs keyed by the id the widget generated, so Stop can find them.
@@ -765,6 +767,7 @@ pub fn run_code(
         Some(prepare) => prepare(&code),
         None => code,
     };
+    let code = sudo_reads_stdin(runtime.id, code);
     let temp_dir = match tool.source {
         Source::Inline => None,
         Source::File(ext) | Source::Compile(ext) => Some(write_source(&run_id, ext, &code)?),
@@ -785,7 +788,7 @@ pub fn run_code(
         .env("PATH", path)
         .envs(RUN_ENV.iter().copied())
         .envs(if options.color { COLOR_ENV } else { &[] }.iter().copied())
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(dir) = run_dir.as_deref() {
@@ -811,6 +814,7 @@ pub fn run_code(
         RunHandle {
             pid,
             cancelled: cancelled.clone(),
+            stdin: Arc::new(Mutex::new(child.stdin.take())),
         },
     );
 
@@ -902,6 +906,64 @@ pub fn run_code(
     });
 
     Ok(RunStart::Started)
+}
+
+/// The input pipe of a live run. Cloned out so a write that blocks (the
+/// program isn't reading) never holds the registry lock.
+fn run_stdin(
+    registry: &RunRegistry,
+    run_id: &str,
+) -> Option<Arc<Mutex<Option<std::process::ChildStdin>>>> {
+    registry
+        .0
+        .lock()
+        .get(run_id)
+        .map(|handle| handle.stdin.clone())
+}
+
+/// Send text (usually a typed line plus "\n") to a running block's input.
+#[tauri::command(async)]
+pub fn write_run_stdin(
+    run_id: String,
+    text: String,
+    registry: State<'_, Arc<RunRegistry>>,
+) -> Result<(), AppError> {
+    use std::io::Write;
+    let stdin = run_stdin(&registry, &run_id)
+        .ok_or_else(|| AppError::Message("This run has already finished".into()))?;
+    let mut guard = stdin.lock();
+    let pipe = guard
+        .as_mut()
+        .ok_or_else(|| AppError::Message("Input was already ended for this run".into()))?;
+    pipe.write_all(text.as_bytes())
+        .and_then(|()| pipe.flush())
+        .map_err(|e| AppError::Message(format!("The program stopped reading input ({e})")))
+}
+
+/// End a running block's input (the program reads end-of-file), like ⌃D.
+#[tauri::command]
+pub fn close_run_stdin(run_id: String, registry: State<'_, Arc<RunRegistry>>) {
+    if let Some(stdin) = run_stdin(&registry, &run_id) {
+        stdin.lock().take();
+    }
+}
+
+/// `sudo` needs a terminal for its password prompt; `-S` makes it read the
+/// password from the run's input instead (the tray's input line, masked).
+/// Prepended on the block's first line so error line numbers don't move.
+fn sudo_reads_stdin(runtime_id: &str, code: String) -> String {
+    let posix_shell = matches!(runtime_id, "bash" | "zsh" | "sh");
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    let mentions_sudo = code.match_indices("sudo").any(|(i, _)| {
+        let before = code[..i].chars().next_back();
+        let after = code[i + 4..].chars().next();
+        !before.is_some_and(word) && !after.is_some_and(word)
+    });
+    if posix_shell && mentions_sudo {
+        format!("sudo() {{ command sudo -S \"$@\"; }}; {code}")
+    } else {
+        code
+    }
 }
 
 #[tauri::command]
@@ -1105,6 +1167,53 @@ mod tests {
             setting,
             "nonsense is ignored"
         );
+    }
+
+    #[test]
+    fn sudo_reads_its_password_from_input_in_posix_shells() {
+        let wrapped = sudo_reads_stdin("bash", "sudo ls /root".into());
+        assert_eq!(
+            wrapped,
+            r#"sudo() { command sudo -S "$@"; }; sudo ls /root"#
+        );
+        assert!(!wrapped.contains('\n'), "line numbers must not move");
+        // Not a word on its own, or not a POSIX shell: untouched.
+        assert_eq!(
+            sudo_reads_stdin("bash", "echo pseudo".into()),
+            "echo pseudo"
+        );
+        assert_eq!(sudo_reads_stdin("bash", "sudo-like".into()), "sudo-like");
+        assert_eq!(sudo_reads_stdin("python", "# sudo".into()), "# sudo");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_reads_what_is_written_to_its_stdin() {
+        use std::io::{Read, Write};
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "read name; echo \"hi $name\"; cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = Arc::new(Mutex::new(child.stdin.take()));
+        stdin
+            .lock()
+            .as_mut()
+            .unwrap()
+            .write_all(b"Diaa\nrest")
+            .unwrap();
+        // Ending input (dropping the pipe) lets `cat` finish.
+        stdin.lock().take();
+        let mut out = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut out)
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(out, "hi Diaa\nrest");
     }
 
     #[test]

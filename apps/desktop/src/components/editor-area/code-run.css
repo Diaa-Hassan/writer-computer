@@ -305,3 +305,64 @@
   text-decoration: underline;
   text-underline-offset: 2px;
 }
+
+/* Input line while a program runs (Enter sends, ⌃D ends input). */
+.cm-editor .cm-code-run-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 8px 12px;
+}
+
+.cm-editor .cm-code-run-input[hidden] {
+  display: none;
+}
+
+.cm-editor .cm-code-run-input-mark {
+  color: var(--accent);
+  font-family: var(--pm-code-font, ui-monospace, monospace);
+  font-weight: 600;
+}
+
+.cm-editor .cm-code-run-input-field {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--surface-input);
+  color: var(--text-primary);
+  font-family: var(--pm-code-font, ui-monospace, monospace);
+  font-size: 0.85em;
+  outline: none;
+}
+
+.cm-editor .cm-code-run-input-field:focus {
+  border-color: var(--focus-border);
+}
+
+.cm-editor .cm-code-run-input-field::placeholder {
+  color: var(--text-muted);
+}
+
+.cm-editor .cm-code-run-input-end {
+  padding: 3px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-family: var(--writer-ui-font, inherit);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cm-editor .cm-code-run-input-end:hover {
+  background: var(--item-hover-bg);
+  color: var(--text-primary);
+}
+
+/* Typed input, echoed into the output like a terminal. */
+.cm-editor .cm-code-run-stdin {
+  color: var(--accent);
+}

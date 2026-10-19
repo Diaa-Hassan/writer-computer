@@ -339,3 +339,13 @@ export function runCode(
 export function cancelRun(runId: string): Promise<void> {
   return invoke("cancel_run", { runId });
 }
+
+/** Send text to a running block's input (a typed line plus "\n"). */
+export function writeRunStdin(runId: string, text: string): Promise<void> {
+  return invoke("write_run_stdin", { runId, text });
+}
+
+/** End a running block's input: the program reads end-of-file. */
+export function closeRunStdin(runId: string): Promise<void> {
+  return invoke("close_run_stdin", { runId });
+}

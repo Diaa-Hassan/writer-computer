@@ -613,6 +613,8 @@ pub fn run() {
             commands::settings::reset_setting,
             commands::run::run_code,
             commands::run::cancel_run,
+            commands::run::write_run_stdin,
+            commands::run::close_run_stdin,
             telemetry::telemetry_should_prompt,
             telemetry::telemetry_mark_prompted,
             telemetry::telemetry_report_declined,

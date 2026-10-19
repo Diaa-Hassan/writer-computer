@@ -23,7 +23,14 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import runtimes from "@shared/code-runtimes.json";
 import { getParentDir } from "@/lib/paths";
 import { useSettingsStore } from "@/stores/settings-store";
-import { cancelRun, runCode, type RunEvent, type RunOptions } from "@/lib/tauri";
+import {
+  cancelRun,
+  closeRunStdin,
+  runCode,
+  type RunEvent,
+  type RunOptions,
+  writeRunStdin,
+} from "@/lib/tauri";
 import { type AnsiSegment, type AnsiStyle, parseAnsi, plainStyle, segmentCss } from "./ansi";
 import "./code-run.css";
 
@@ -55,7 +62,8 @@ type Stream = "stdout" | "stderr";
 type RunStatus = "running" | "needs-trust" | "done" | "failed" | "stopped" | "timedout";
 
 interface Chunk {
-  stream: Stream;
+  /** `stdin`: what the user typed, echoed like a terminal would. */
+  stream: Stream | "stdin";
   /** Plain text, for Copy. */
   text: string;
   /** The same text split by terminal style, for display. */
@@ -72,6 +80,8 @@ interface Session {
   held: Record<Stream, string>;
   /** Terminal style in effect at the end of each stream so far. */
   ansi: Record<Stream, AnsiStyle>;
+  /** The user ended the program's input (⌃D / End input). */
+  inputClosed: boolean;
   /** Called with a new chunk, or with nothing when the status changed. */
   listeners: Set<(chunk?: Chunk) => void>;
   /** Resolves with the final status once the run ends (or is dropped). */
@@ -99,6 +109,26 @@ function appendChunk(session: Session, stream: Stream, raw: string): void {
   const chunk = { stream, text, segments };
   session.chunks.push(chunk);
   for (const listener of session.listeners) listener(chunk);
+}
+
+/** Show typed input in the output, as a terminal echoes it. */
+function echoInput(session: Session, text: string): void {
+  const chunk: Chunk = { stream: "stdin", text, segments: [{ text, style: plainStyle() }] };
+  session.chunks.push(chunk);
+  for (const listener of session.listeners) listener(chunk);
+}
+
+const PASSWORD_PROMPT = /pass(word|phrase)|\bpin\b|secret/i;
+
+/** True when the output so far ends in what looks like a password prompt,
+ *  so the input line should mask what is typed and not echo it. */
+export function wantsSecretInput(chunks: readonly { stream: string; text: string }[]): boolean {
+  const printed = chunks
+    .filter((chunk) => chunk.stream !== "stdin")
+    .map((chunk) => chunk.text)
+    .join("");
+  const lastLine = printed.replace(/\n+$/, "").split("\n").pop() ?? "";
+  return PASSWORD_PROMPT.test(lastLine);
 }
 
 function finishSession(
@@ -350,6 +380,7 @@ function startRun(view: EditorView, fence: RunnableFence): Session {
     chunks: [],
     held: { stdout: "", stderr: "" },
     ansi: { stdout: plainStyle(), stderr: plainStyle() },
+    inputClosed: false,
     listeners: new Set(),
     finished,
     settle,
@@ -686,6 +717,42 @@ class RunTrayWidget extends WidgetType {
 
     const output = tray.appendChild(document.createElement("pre"));
     output.className = "cm-code-run-output";
+
+    // Input line, shown while the program runs: Enter sends a line, ⌃D ends
+    // input. Masked (and not echoed) after a password-looking prompt.
+    const inputRow = tray.appendChild(document.createElement("div"));
+    inputRow.className = "cm-code-run-input";
+    const promptMark = inputRow.appendChild(document.createElement("span"));
+    promptMark.className = "cm-code-run-input-mark";
+    promptMark.textContent = "›";
+    const input = inputRow.appendChild(document.createElement("input"));
+    input.className = "cm-code-run-input-field";
+    input.setAttribute("aria-label", "Input for the running program");
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    const endInput = () => {
+      if (session.inputClosed || session.status !== "running") return;
+      session.inputClosed = true;
+      void closeRunStdin(session.id);
+      for (const listener of session.listeners) listener();
+    };
+    inputRow.append(textButton("cm-code-run-input-end", "End input", endInput));
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.isComposing) {
+        event.preventDefault();
+        const secret = input.type === "password";
+        const line = `${input.value}\n`;
+        input.value = "";
+        // A terminal shows typed text but not a typed password.
+        echoInput(session, secret ? "\n" : line);
+        writeRunStdin(session.id, line).catch((err: unknown) => {
+          appendChunk(session, "stderr", `${String(err)}\n`);
+        });
+      } else if (event.key === "d" && event.ctrlKey) {
+        event.preventDefault();
+        endInput();
+      }
+    });
     const empty = document.createElement("span");
     empty.className = "cm-code-run-empty";
     empty.textContent = "No output";
@@ -700,6 +767,13 @@ class RunTrayWidget extends WidgetType {
       folder.textContent = session.trustFolder ?? "";
       rerun.hidden = isActive(session);
       copy.hidden = session.chunks.length === 0;
+      inputRow.hidden = session.status !== "running" || session.inputClosed;
+      const inputType = wantsSecretInput(session.chunks) ? "password" : "text";
+      if (input.type !== inputType) input.type = inputType;
+      input.placeholder =
+        inputType === "password"
+          ? "Password (hidden)"
+          : "Input · Enter sends a line, ⌃D ends input";
       if (!isActive(session) && session.chunks.length === 0 && !empty.isConnected) {
         output.append(empty);
       }

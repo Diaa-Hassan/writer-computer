@@ -29,6 +29,7 @@ const {
   runnableFenceStarts,
   parseFenceOptions,
   runnableLang,
+  wantsSecretInput,
 } = await import("../src/components/editor-area/code-run-decorations");
 const { plainStyle } = await import("../src/components/editor-area/ansi");
 
@@ -105,6 +106,7 @@ describe("code run decorations", () => {
       chunks: [],
       held: { stdout: "", stderr: "" },
       ansi: { stdout: plainStyle(), stderr: plainStyle() },
+      inputClosed: false,
       listeners: new Set(),
       finished: Promise.resolve("done"),
       settle: () => {},
@@ -151,6 +153,24 @@ describe("parseFenceOptions", () => {
       skip: false,
     });
     expect(parseFenceOptions("bash timeout=-1 color=yes")).toEqual({ color: false, skip: false });
+  });
+});
+
+describe("wantsSecretInput", () => {
+  const out = (...texts: string[]) => texts.map((text) => ({ stream: "stdout", text }));
+
+  test("masks after a password-looking prompt on the last line", () => {
+    expect(wantsSecretInput(out("Connecting…\n", "Password: "))).toBe(true);
+    expect(wantsSecretInput(out("[sudo] password for diaa: "))).toBe(true);
+    expect(wantsSecretInput(out("Enter passphrase for key:\n"))).toBe(true);
+    expect(wantsSecretInput(out("Enter PIN: "))).toBe(true);
+  });
+
+  test("doesn't mask ordinary prompts, earlier lines, or typed text", () => {
+    expect(wantsSecretInput(out("Name: "))).toBe(false);
+    expect(wantsSecretInput(out("password changed\n", "Next: "))).toBe(false);
+    expect(wantsSecretInput([{ stream: "stdin", text: "my password\n" }])).toBe(false);
+    expect(wantsSecretInput(out("spinning\n"))).toBe(false);
   });
 });
 

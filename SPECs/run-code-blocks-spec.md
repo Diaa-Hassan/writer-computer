@@ -54,7 +54,7 @@ Known limits: Ruby, Perl and Lua buffer output when it isn't a terminal, so thei
 - **Never automatic.** Nothing runs on open, on edit or on save; only a click on Run starts a process.
 - **The fence stays plain source.** The widget sits below the fence (`Decoration.widget` at `node.to`, `keepDecorationOnUnfold`), so editing the code is unchanged.
 - **Working directory:** the note's folder. Falls back to the app's working directory when the note has no path or the folder is gone.
-- **Environment:** the app's environment with `PATH` replaced by the login shell's (see Languages). No stdin: a block that reads input gets end-of-file.
+- **Environment:** the app's environment with `PATH` replaced by the login shell's (see Languages).
 - **Run control:** a quiet `▶ Run` pill floated into the fence's first line (the hidden ```marker line), so it sits in the block's top-right corner. While running it becomes an accent-tinted`■ Stop`. **⌥↵** (Alt+Enter) runs or stops the runnable block containing the caret; it falls through when the caret isn't in one.
 - **Output tray:** appears only after the first run, attached to the block's bottom edge (the last code line loses its bottom radius, the tray continues the code surface with a hairline divider). Header: status dot + text — `Running · 3.2s` (pulsing accent dot, live timer; no pulse under reduced motion), `Done · 120ms` (green), `Exit 2 · 40ms` (red), `Stopped · 4.1s` — and actions Copy output, Run again (hidden while running) and Clear (removes the tray; stops the run if it is still going). Body: stdout, stderr in red, terminal colours drawn (see Colours), `No output` when the run printed nothing. The body caps at 22em and scrolls; it follows new output only while scrolled to the bottom.
 - **Output lifetime:** kept in memory, never written to the note. It belongs to the fence, not to the widget DOM: the fence's start carries a mark (a `RangeSet` in editor state, mapped through edits) holding the id of its latest run, so output survives edits and scrolling the block out of view. Re-running replaces it. The run is stopped and its output dropped when the mark goes away: the fence is deleted, Clear is pressed, the editor reuses the tab for another document, or the tab is closed. Switching tabs does not: inactive tabs stay mounted, so their runs continue.
@@ -100,6 +100,13 @@ Words after the language in the info string, parsed by the editor (`parseFenceOp
 
 `ansi.ts` turns output into styled segments: SGR codes give the 16 palette colours (theme-tuned variables `--ansi-0…15`, separate light and dark palettes so "white" stays readable on light), 256-colour and truecolor (inline `rgb()`), bold, dim, italic, underline and inverse. Every other escape (cursor moves, line clears, OSC titles and links) and stray ESC characters are dropped. Style carries across chunks, and an escape cut off at a read boundary is held until its end arrives. Copy output copies the plain text.
 
+## Input
+
+- A run's stdin is a pipe. While it runs, the tray shows an input line under the output: **Enter** sends the line (plus `\n`) through `write_run_stdin` and echoes it into the output in the accent colour, as a terminal would; **⌃D** or **End input** calls `close_run_stdin`, so the program reads end-of-file. The line hides when input is ended or the run finishes.
+- **Passwords:** when the last printed line looks like a password prompt (`password`, `passphrase`, `PIN`, `secret`), the field becomes a password field and the typed text isn't echoed (only the newline).
+- **sudo** in bash, zsh and sh blocks is wrapped as `sudo() { command sudo -S "$@"; }; ` on the block's first line (line numbers unchanged), so it reads the password from the input line instead of needing a terminal.
+- A block that waits for input waits, including during Run All; Stop and the time limit still apply. Writes happen off the registry lock, so a program that never reads can't block Stop.
+
 ## Design
 
 - `shared/code-runtimes.json` maps every fence language and alias → runtime id. The editor reads it to decide where to show Run and sends the id; `RUNTIMES` in `commands/run.rs` holds each runtime's tools. A test checks every mapped id exists and every runtime is reachable under its own name.
@@ -116,6 +123,6 @@ Add a `Runtime` to `RUNTIMES` in `commands/run.rs` (its tools, each `inline(prog
 ## Non-goals (this version)
 
 - Shared state between blocks, variables across blocks or languages.
-- Interactive stdin, a terminal/TTY (programs see a pipe; `color` covers the common colour switches), carriage-return progress bars redrawing in place.
+- A terminal/TTY (programs see pipes; `color` covers the common colour switches), carriage-return progress bars redrawing in place.
 - Saving output into the note.
 - Running from Reading/preview surfaces other than the editor.
