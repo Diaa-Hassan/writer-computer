@@ -6,21 +6,30 @@ A ` ```bash ` fence gets a **▶ Run** pill in its top-right corner. Clicking it
 
 ## Languages
 
-| Fence (aliases)              | Tools tried, first installed wins                  | How the code is passed                     |
-| ---------------------------- | -------------------------------------------------- | ------------------------------------------ |
-| `bash`                       | `bash -c`                                          | inline                                     |
-| `zsh`                        | `zsh -c`                                           | inline                                     |
-| `sh` (`shell`)               | `sh -c`                                            | inline                                     |
-| `python` (`py`, `python3`)   | `python3 -u -c`, `python -u -c`                    | inline, unbuffered                         |
-| `javascript` (`js`, `node`)  | `node -e`, `bun -e`, `deno eval`                   | inline                                     |
-| `typescript` (`ts`)          | `bun run`, `deno run -A`, `tsx`                    | temp file `main.ts`                        |
-| `ruby` (`rb`)                | `ruby -e`                                          | inline                                     |
-| `perl` (`pl`)                | `perl -e`                                          | inline                                     |
-| `lua`                        | `lua -e`, `luajit -e`                              | inline                                     |
-| `go` (`golang`)              | `go run`                                           | temp file `main.go` (needs `package main`) |
-| `swift`                      | `swift`                                            | temp file `main.swift`                     |
-| `applescript` (`osascript`)  | `osascript -e`                                     | inline (macOS)                             |
-| `powershell` (`pwsh`, `ps1`) | `pwsh -NoLogo -NoProfile -NonInteractive -Command` | inline                                     |
+| Fence (aliases)              | Tools tried, first installed wins                  | How the code is passed                                                                                       |
+| ---------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `bash`                       | `bash -c`                                          | inline                                                                                                       |
+| `zsh`                        | `zsh -c`                                           | inline                                                                                                       |
+| `sh` (`shell`)               | `sh -c`                                            | inline                                                                                                       |
+| `python` (`py`, `python3`)   | `python3 -u -c`, `python -u -c`                    | inline, unbuffered                                                                                           |
+| `javascript` (`js`, `node`)  | `node -e`, `bun -e`, `deno eval`                   | inline                                                                                                       |
+| `typescript` (`ts`)          | `bun run`, `deno run -A`, `tsx`                    | temp file `main.ts`                                                                                          |
+| `ruby` (`rb`)                | `ruby -e`                                          | inline                                                                                                       |
+| `perl` (`pl`)                | `perl -e`                                          | inline                                                                                                       |
+| `lua`                        | `lua -e`, `luajit -e`                              | inline                                                                                                       |
+| `go` (`golang`)              | `go run`                                           | temp file `main.go` (needs `package main`)                                                                   |
+| `swift`                      | `swift`                                            | temp file `main.swift`                                                                                       |
+| `applescript` (`osascript`)  | `osascript -e`                                     | inline (macOS)                                                                                               |
+| `powershell` (`pwsh`, `ps1`) | `pwsh -NoLogo -NoProfile -NonInteractive -Command` | inline                                                                                                       |
+| `r`                          | `Rscript -e`                                       | inline                                                                                                       |
+| `php`                        | `php`                                              | temp file `main.php`; `<?php` is added when the block doesn't start with a PHP tag (after a shebang, if any) |
+| `csharp` (`cs`, `c#`)        | `dotnet run`                                       | temp file `main.cs` (.NET 10 file-based app; a block's first run builds it, so it takes a few seconds)       |
+| `java`                       | `java`                                             | temp file `main.java`, single-file source launch (Java 11+)                                                  |
+| `c`                          | `cc`, `gcc`, `clang` (with `-lm`)                  | compiled: `main.c` → `main`, then run                                                                        |
+| `cpp` (`c++`, `cxx`)         | `c++`, `g++`, `clang++` (with `-std=c++17`)        | compiled: `main.cpp` → `main`, then run                                                                      |
+| `rust` (`rs`)                | `rustc --edition 2021`                             | compiled: `main.rs` → `main`, then run                                                                       |
+
+**Compiled languages** run as one `/bin/sh -c 'src=$1; out=$2; shift 2; "$0" "$src" -o "$out" "$@" && exec "$out"' <compiler> main.c main <flags>`: a compile error is the run's stderr and exit code, and on success the shell is replaced by the program. Both steps share the run's process group, so Stop and the time limit cover the compiler too. Every run also gets `DOTNET_NOLOGO=1` so dotnet's first-run banner stays out of the output.
 
 **Works on any machine.** Nothing assumes a particular setup:
 
@@ -78,7 +87,7 @@ All three are `"scope": "global"`, and a Rust test fails if that ever changes. W
 
 ## Adding a language
 
-Add a `Runtime` to `RUNTIMES` in `commands/run.rs` (its tools, each `inline(program, args)` or `file(program, args, ext)`), and map the fence name and any aliases to its id in `shared/code-runtimes.json`. Compiled languages (C, Rust) need a compile-then-run step that doesn't exist yet.
+Add a `Runtime` to `RUNTIMES` in `commands/run.rs` (its tools, each `inline(program, args)` or `file(program, args, ext)`), and map the fence name and any aliases to its id in `shared/code-runtimes.json`. Use `compile(program, flags, ext)` for a compiler that takes `<source> -o <binary>`; a tool's optional `prepare` rewrites the code first (see `php_open_tag`).
 
 ## Non-goals (this version)
 
