@@ -38,7 +38,20 @@ enum Source {
     /// Written to `main.<ext>` in a per-run temp dir, whose path is the last
     /// argument: `go run /tmp/…/main.go`. For tools that only read files.
     File(&'static str),
+    /// Written to `main.<ext>`, compiled to `main` next to it, then run:
+    /// `cc main.c -o main <args…> && exec ./main`, both under one `sh` so
+    /// Stop and the time limit cover the compiler and the program alike.
+    Compile(&'static str),
 }
+
+/// Compiles `$1` to `$2` with the compiler in `$0` (extra flags follow),
+/// then replaces the shell with the program.
+const COMPILE_SCRIPT: &str =
+    r#"src="$1"; out="$2"; shift 2; "$0" "$src" -o "$out" "$@" && exec "$out""#;
+
+/// Set for every run. dotnet prints a first-run banner into the output
+/// otherwise.
+const RUN_ENV: &[(&str, &str)] = &[("DOTNET_NOLOGO", "1")];
 
 /// One way to run a language: a program, its arguments, and how it takes
 /// the code.
@@ -46,6 +59,8 @@ struct Tool {
     program: &'static str,
     args: &'static [&'static str],
     source: Source,
+    /// Rewrites the block before it is written or passed (PHP's open tag).
+    prepare: Option<fn(&str) -> String>,
 }
 
 const fn inline(program: &'static str, args: &'static [&'static str]) -> Tool {
@@ -53,6 +68,7 @@ const fn inline(program: &'static str, args: &'static [&'static str]) -> Tool {
         program,
         args,
         source: Source::Inline,
+        prepare: None,
     }
 }
 
@@ -61,7 +77,31 @@ const fn file(program: &'static str, args: &'static [&'static str], ext: &'stati
         program,
         args,
         source: Source::File(ext),
+        prepare: None,
     }
+}
+
+const fn compile(program: &'static str, args: &'static [&'static str], ext: &'static str) -> Tool {
+    Tool {
+        program,
+        args,
+        source: Source::Compile(ext),
+        prepare: None,
+    }
+}
+
+/// PHP files print anything outside `<?php`, so a block written without the
+/// tag gets one (after a shebang line, if there is one).
+fn php_open_tag(code: &str) -> String {
+    let body_start = if code.starts_with("#!") {
+        code.find('\n').map_or(code.len(), |i| i + 1)
+    } else {
+        0
+    };
+    if code[body_start..].trim_start().starts_with("<?") {
+        return code.to_owned();
+    }
+    format!("{}<?php\n{}", &code[..body_start], &code[body_start..])
 }
 
 /// A language and the tools that can run it, in order of preference. A run
@@ -158,6 +198,57 @@ const RUNTIMES: &[Runtime] = &[
             "pwsh",
             &["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
         )],
+    },
+    Runtime {
+        id: "r",
+        label: "R",
+        tools: &[inline("Rscript", &["-e"])],
+    },
+    Runtime {
+        id: "php",
+        label: "PHP",
+        tools: &[Tool {
+            program: "php",
+            args: &[],
+            source: Source::File("php"),
+            prepare: Some(php_open_tag),
+        }],
+    },
+    Runtime {
+        id: "csharp",
+        label: "C#",
+        // .NET 10 runs a single .cs file directly.
+        tools: &[file("dotnet", &["run"], "cs")],
+    },
+    Runtime {
+        id: "java",
+        label: "Java",
+        // Single-file source launch (Java 11+): no javac step needed.
+        tools: &[file("java", &[], "java")],
+    },
+    Runtime {
+        id: "c",
+        label: "C",
+        // -lm: Linux keeps libm separate; harmless on macOS.
+        tools: &[
+            compile("cc", &["-lm"], "c"),
+            compile("gcc", &["-lm"], "c"),
+            compile("clang", &["-lm"], "c"),
+        ],
+    },
+    Runtime {
+        id: "cpp",
+        label: "C++",
+        tools: &[
+            compile("c++", &["-std=c++17"], "cpp"),
+            compile("g++", &["-std=c++17"], "cpp"),
+            compile("clang++", &["-std=c++17"], "cpp"),
+        ],
+    },
+    Runtime {
+        id: "rust",
+        label: "Rust",
+        tools: &[compile("rustc", &["--edition", "2021"], "rs")],
     },
 ];
 
@@ -459,6 +550,35 @@ fn interpreter_override(
     })
 }
 
+/// The process to spawn for `tool`: the program itself, or for compiled
+/// languages a shell that compiles and then execs the result. `file` is the
+/// written source for File/Compile tools.
+fn tool_command(tool: &Tool, program: &Path, code: &str, file: Option<&Path>) -> Command {
+    match (&tool.source, file) {
+        (Source::Compile(_), Some(file)) => {
+            let mut command = Command::new("/bin/sh");
+            command
+                .arg("-c")
+                .arg(COMPILE_SCRIPT)
+                .arg(program)
+                .arg(file)
+                .arg(file.with_extension(""))
+                .args(tool.args);
+            command
+        }
+        (_, Some(file)) => {
+            let mut command = Command::new(program);
+            command.args(tool.args).arg(file);
+            command
+        }
+        (_, None) => {
+            let mut command = Command::new(program);
+            command.args(tool.args).arg(code);
+            command
+        }
+    }
+}
+
 /// Writes the block to `main.<ext>` in a temp dir named after the run.
 fn write_source(run_id: &str, ext: &str, code: &str) -> Result<(PathBuf, PathBuf), AppError> {
     // The id names a directory, so it must not be able to climb out of it.
@@ -519,9 +639,13 @@ pub fn run_code(
         None => resolve_tool(runtime, path)?,
     };
     let program = tool.program;
+    let code = match tool.prepare {
+        Some(prepare) => prepare(&code),
+        None => code,
+    };
     let temp_dir = match tool.source {
         Source::Inline => None,
-        Source::File(ext) => Some(write_source(&run_id, ext, &code)?),
+        Source::File(ext) | Source::Compile(ext) => Some(write_source(&run_id, ext, &code)?),
     };
     let cleanup = move |dir: Option<(PathBuf, PathBuf)>| {
         if let Some((dir, _)) = dir {
@@ -529,14 +653,15 @@ pub fn run_code(
         }
     };
 
-    let mut command = Command::new(&program_path);
-    command.args(tool.args);
-    match &temp_dir {
-        Some((_, file)) => command.arg(file),
-        None => command.arg(&code),
-    };
+    let mut command = tool_command(
+        tool,
+        &program_path,
+        &code,
+        temp_dir.as_ref().map(|(_, f)| f.as_path()),
+    );
     command
         .env("PATH", path)
+        .envs(RUN_ENV.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -818,6 +943,98 @@ mod tests {
         assert!(err(&["go /usr/bin/go"]).contains("language=/path"));
         assert!(err(&["go=relative/go"]).contains("doesn't exist"));
         assert!(err(&["go=/no/such/go"]).contains("doesn't exist"));
+    }
+
+    #[test]
+    fn php_blocks_get_an_open_tag_once() {
+        assert_eq!(php_open_tag("echo 1;"), "<?php\necho 1;");
+        assert_eq!(php_open_tag("<?php echo 1;"), "<?php echo 1;");
+        assert_eq!(php_open_tag("  <?= 1 ?>"), "  <?= 1 ?>");
+        assert_eq!(
+            php_open_tag("#!/usr/bin/env php\necho 1;"),
+            "#!/usr/bin/env php\n<?php\necho 1;"
+        );
+    }
+
+    fn argv(command: &Command) -> Vec<String> {
+        std::iter::once(command.get_program())
+            .chain(command.get_args())
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn each_source_kind_builds_its_command() {
+        let python = &runtime("python").unwrap().tools[0];
+        assert_eq!(
+            argv(&tool_command(
+                python,
+                Path::new("/bin/python3"),
+                "print(1)",
+                None
+            )),
+            ["/bin/python3", "-u", "-c", "print(1)"]
+        );
+        let go = &runtime("go").unwrap().tools[0];
+        assert_eq!(
+            argv(&tool_command(
+                go,
+                Path::new("/bin/go"),
+                "",
+                Some(Path::new("/t/main.go"))
+            )),
+            ["/bin/go", "run", "/t/main.go"]
+        );
+        let c = &runtime("c").unwrap().tools[0];
+        assert_eq!(
+            argv(&tool_command(
+                c,
+                Path::new("/usr/bin/cc"),
+                "",
+                Some(Path::new("/t/main.c"))
+            )),
+            [
+                "/bin/sh",
+                "-c",
+                COMPILE_SCRIPT,
+                "/usr/bin/cc",
+                "/t/main.c",
+                "/t/main",
+                "-lm"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_compile_script_compiles_then_runs() {
+        // A stand-in "compiler" that writes a script to the -o path proves the
+        // argument order and the exec, without needing a real toolchain.
+        let dir = tempfile::tempdir().unwrap();
+        let fake_cc = dir.path().join("fakecc");
+        std::fs::write(
+            &fake_cc,
+            "#!/bin/sh\nprintf '#!/bin/sh\\necho ran %s with %s\\n' \"$1\" \"$4\" > \"$3\"; chmod +x \"$3\"\n",
+        )
+        .unwrap();
+        let src = dir.path().join("main.c");
+        std::fs::write(&src, "").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_cc, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let tool = compile("fakecc", &["-lm"], "c");
+        let out = tool_command(&tool, &fake_cc, "", Some(&src))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("ran {} with -lm\n", src.display())
+        );
     }
 
     #[test]

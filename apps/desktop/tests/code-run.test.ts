@@ -61,10 +61,14 @@ describe("runnableLang", () => {
     expect(runnableLang("JS")).toBe("javascript");
     expect(runnableLang("ts")).toBe("typescript");
     expect(runnableLang("shell")).toBe("sh");
+    expect(runnableLang("c#")).toBe("csharp");
+    expect(runnableLang("C++")).toBe("cpp");
+    expect(runnableLang("rs")).toBe("rust");
+    expect(runnableLang("R")).toBe("r");
   });
 
   test("rejects languages without a runtime", () => {
-    expect(runnableLang("rust")).toBeNull();
+    expect(runnableLang("haskell")).toBeNull();
     expect(runnableLang("")).toBeNull();
     expect(runnableLang("toString")).toBeNull();
   });
@@ -80,7 +84,7 @@ describe("code run decorations", () => {
   });
 
   test("other languages, unclosed fences and empty fences get nothing", () => {
-    expect(widgets(makeState("```rust\nfn main() {}\n```"))).toEqual([]);
+    expect(widgets(makeState("```haskell\nmain = print 1\n```"))).toEqual([]);
     expect(widgets(makeState("```bash\necho still typing"))).toEqual([]);
     expect(widgets(makeState("```bash\n\n```"))).toEqual([]);
   });

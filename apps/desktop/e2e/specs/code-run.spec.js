@@ -32,6 +32,11 @@ describe("Running code blocks", function () {
     'console.log("js:" + 6 * 7)',
     "```",
     "",
+    "```c",
+    "#include <stdio.h>",
+    'int main(void) { printf("c:%d\\n", 6 * 7); return 0; }',
+    "```",
+    "",
     "after",
     "",
   ].join("\n");
@@ -112,12 +117,12 @@ describe("Running code blocks", function () {
     await row.waitForExist({ timeout: 15_000 });
     await row.click();
 
-    await browser.waitUntil(async () => (await ui()).toggles.length === 4, {
+    await browser.waitUntil(async () => (await ui()).toggles.length === 5, {
       timeout: 10_000,
       timeoutMsg: "run buttons never rendered",
     });
     const { toggles, trays } = await ui();
-    strictEqual(toggles.join(","), "Run,Run,Run,Run");
+    strictEqual(toggles.join(","), "Run,Run,Run,Run,Run");
     strictEqual(trays.length, 0);
   });
 
@@ -166,22 +171,25 @@ describe("Running code blocks", function () {
   it("runs other languages through the user's login-shell PATH", async function () {
     await clickToggle(2);
     await clickToggle(3);
+    await clickToggle(4);
     await browser.waitUntil(
       async () => {
         const { trays } = await ui();
-        return trays.length === 4 && trays[2].state !== "running" && trays[3].state !== "running";
+        return trays.length === 5 && trays.slice(2).every((t) => t.state !== "running");
       },
       { timeout: 15_000, timeoutMsg: "python/node runs never finished" },
     );
     const { trays } = await ui();
     strictEqual(trays[2].stdout, "py: 42\n", `python: ${trays[2].stderr}`);
     strictEqual(trays[3].stdout, "js:42\n", `node: ${trays[3].stderr}`);
+    // Compiled in the run's temp dir, then executed.
+    strictEqual(trays[4].stdout, "c:42\n", `c: ${trays[4].stderr}`);
   });
 
   it("clears a tray", async function () {
     const clear = await $$(".cm-code-run-tray")[0].$('button[aria-label="Clear output"]');
     await clear.click();
-    await browser.waitUntil(async () => (await ui()).trays.length === 3, {
+    await browser.waitUntil(async () => (await ui()).trays.length === 4, {
       timeout: 5_000,
       timeoutMsg: "Clear did not remove the tray",
     });
