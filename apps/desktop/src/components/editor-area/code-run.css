@@ -1,0 +1,379 @@
+/* Runnable fences (code-run-decorations.ts): a Run/Stop pill in the block's
+   top-right corner, and an output tray attached under the block once it has
+   run. The tray continues the block's surface so code and result read as one
+   unit; `.cm-code-run-attached` squares off the block's bottom corners. */
+
+.cm-editor .cm-code-run-corner {
+  float: right;
+  padding: 0.3rem 0.35rem 0 0;
+  line-height: 1;
+}
+
+.cm-editor .cm-code-run-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px 3px 6px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--writer-ui-font, inherit);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 120ms,
+    color 120ms;
+}
+
+.cm-editor .cm-code-run-toggle svg {
+  width: 12px;
+  height: 12px;
+}
+
+.cm-editor .cm-code-run-toggle:hover {
+  background: var(--item-hover-bg);
+  color: var(--text-primary);
+}
+
+.cm-editor .cm-code-run-toggle[data-running="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.cm-editor .cm-code-run-toggle:focus-visible,
+.cm-editor .cm-code-run-action:focus-visible {
+  outline: 1px solid var(--focus-border);
+  outline-offset: 1px;
+}
+
+.cm-editor .cm-fenced-code-line-last.cm-code-run-attached {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.cm-editor .cm-code-run-tray {
+  margin: 0 0 0.6rem;
+  border-top: 1px solid var(--line-subtler);
+  border-bottom-left-radius: 0.4rem;
+  border-bottom-right-radius: 0.4rem;
+  background: var(--pm-code-background-color);
+}
+
+.cm-editor .cm-code-run-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 0 12px;
+  font-family: var(--writer-ui-font, inherit);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.cm-editor .cm-code-run-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cm-editor .cm-code-run-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-icon-muted);
+}
+
+.cm-editor .cm-code-run-tray[data-status="running"] .cm-code-run-dot {
+  background: var(--accent);
+  animation: cm-code-run-pulse 1.2s ease-in-out infinite;
+}
+
+.cm-editor .cm-code-run-tray[data-status="done"] .cm-code-run-dot {
+  background: #30a46c;
+}
+
+.cm-editor .cm-code-run-tray:is([data-status="failed"], [data-status="timedout"]) .cm-code-run-dot {
+  background: #e5484d;
+}
+
+.cm-editor
+  .cm-code-run-tray:is([data-status="failed"], [data-status="timedout"])
+  .cm-code-run-status {
+  color: #e5484d;
+}
+
+@keyframes cm-code-run-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cm-editor .cm-code-run-tray[data-status="running"] .cm-code-run-dot {
+    animation: none;
+  }
+}
+
+.cm-editor .cm-code-run-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.cm-editor .cm-code-run-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-icon-muted);
+  cursor: pointer;
+}
+
+.cm-editor .cm-code-run-action[hidden] {
+  display: none;
+}
+
+.cm-editor .cm-code-run-action svg {
+  width: 14px;
+  height: 14px;
+}
+
+.cm-editor .cm-code-run-action:hover {
+  background: var(--item-hover-bg);
+  color: var(--text-primary);
+}
+
+.cm-editor .cm-code-run-output {
+  margin: 0;
+  padding: 6px 12px 10px;
+  max-height: 22em;
+  overflow: auto;
+  font-family: var(--pm-code-font, ui-monospace, monospace);
+  font-size: 0.85em;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  color: var(--text-secondary);
+}
+
+.cm-editor .cm-code-run-stderr {
+  color: color-mix(in srgb, #e5484d 85%, var(--fg-base));
+}
+
+.cm-editor .cm-code-run-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Permission prompt for a folder that isn't in Trusted Folders yet. */
+.cm-editor .cm-code-run-tray[data-status="needs-trust"] .cm-code-run-dot {
+  background: var(--accent);
+}
+
+.cm-editor .cm-code-run-trust {
+  padding: 6px 12px 12px;
+  font-family: var(--writer-ui-font, inherit);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.cm-editor .cm-code-run-trust[hidden],
+.cm-editor .cm-code-run-output[hidden] {
+  display: none;
+}
+
+.cm-editor .cm-code-run-trust p {
+  margin: 0 0 6px;
+}
+
+.cm-editor .cm-code-run-trust-folder {
+  display: block;
+  margin-bottom: 10px;
+  font-family: var(--pm-code-font, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.cm-editor .cm-code-run-trust-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.cm-editor .cm-code-run-trust-allow,
+.cm-editor .cm-code-run-trust-cancel {
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.cm-editor .cm-code-run-trust-allow {
+  border-color: transparent;
+  background: var(--accent);
+  color: #fff;
+}
+
+.cm-editor .cm-code-run-trust-allow:hover {
+  filter: brightness(1.08);
+}
+
+.cm-editor .cm-code-run-trust-cancel {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.cm-editor .cm-code-run-trust-cancel:hover {
+  background: var(--item-hover-bg);
+  color: var(--text-primary);
+}
+
+.cm-editor .cm-code-run-trust-allow:focus-visible,
+.cm-editor .cm-code-run-trust-cancel:focus-visible {
+  outline: 1px solid var(--focus-border);
+  outline-offset: 1px;
+}
+
+/* Terminal colours in output (ansi.ts). Palette slots 0–15 are theme-tuned
+   so "white" stays readable on light and "black" on dark; 256-colour and
+   truecolor values arrive as inline styles. */
+.cm-editor .cm-code-run-output {
+  --ansi-0: #383a42;
+  --ansi-1: #d0392f;
+  --ansi-2: #3f8f3e;
+  --ansi-3: #a86f00;
+  --ansi-4: #3a6fd8;
+  --ansi-5: #a626a4;
+  --ansi-6: #0b7fa7;
+  --ansi-7: #6f7277;
+  --ansi-8: #696c77;
+  --ansi-9: #ca1243;
+  --ansi-10: #4f9e4e;
+  --ansi-11: #b67600;
+  --ansi-12: #2f62c9;
+  --ansi-13: #9e2a9c;
+  --ansi-14: #0a7395;
+  --ansi-15: #4b4e55;
+  --ansi-inverse-fg: var(--bg-base);
+  --ansi-inverse-bg: var(--fg-base);
+}
+
+[data-theme="dark"] .cm-editor .cm-code-run-output {
+  --ansi-0: #5c6370;
+  --ansi-1: #e5636d;
+  --ansi-2: #8cc265;
+  --ansi-3: #e0b15c;
+  --ansi-4: #5aaef5;
+  --ansi-5: #c678dd;
+  --ansi-6: #4fbecc;
+  --ansi-7: #c8ccd4;
+  --ansi-8: #7f848e;
+  --ansi-9: #ff7a85;
+  --ansi-10: #a5e075;
+  --ansi-11: #f0c674;
+  --ansi-12: #73bfff;
+  --ansi-13: #de8cf5;
+  --ansi-14: #66d9e8;
+  --ansi-15: #eceff4;
+}
+
+.cm-editor .cm-ansi-bold {
+  font-weight: 600;
+}
+
+.cm-editor .cm-ansi-dim {
+  opacity: 0.65;
+}
+
+.cm-editor .cm-ansi-italic {
+  font-style: italic;
+}
+
+.cm-editor .cm-ansi-underline {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Input line while a program runs (Enter sends, ⌃D ends input). */
+.cm-editor .cm-code-run-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 8px 12px;
+}
+
+.cm-editor .cm-code-run-input[hidden] {
+  display: none;
+}
+
+.cm-editor .cm-code-run-input-mark {
+  color: var(--accent);
+  font-family: var(--pm-code-font, ui-monospace, monospace);
+  font-weight: 600;
+}
+
+.cm-editor .cm-code-run-input-field {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--surface-input);
+  color: var(--text-primary);
+  font-family: var(--pm-code-font, ui-monospace, monospace);
+  font-size: 0.85em;
+  outline: none;
+}
+
+.cm-editor .cm-code-run-input-field:focus {
+  border-color: var(--focus-border);
+}
+
+.cm-editor .cm-code-run-input-field::placeholder {
+  color: var(--text-muted);
+}
+
+.cm-editor .cm-code-run-input-end {
+  padding: 3px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-family: var(--writer-ui-font, inherit);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cm-editor .cm-code-run-input-end:hover {
+  background: var(--item-hover-bg);
+  color: var(--text-primary);
+}
+
+/* Typed input, echoed into the output like a terminal. */
+.cm-editor .cm-code-run-stdin {
+  color: var(--accent);
+}
+
+/* `$name` in prose: the declared variable's value (code-vars-decorations.ts). */
+.cm-editor .cm-code-var {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text-primary);
+  font-family: var(--pm-code-font, ui-monospace, monospace);
+  font-size: 0.88em;
+  white-space: nowrap;
+}

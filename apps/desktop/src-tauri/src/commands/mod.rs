@@ -2,7 +2,9 @@ pub mod fonts;
 pub mod fs;
 pub mod images;
 pub mod recents;
+pub mod run;
 pub mod search;
+pub mod session;
 pub mod settings;
 #[cfg(target_os = "macos")]
 pub mod shell_install;

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import sidebarEntryKinds from "@shared/sidebar-entry-kinds.json";
@@ -302,4 +302,70 @@ export function saveClipboardImage(
   format: string,
 ): Promise<{ relative_path: string; absolute_path: string }> {
   return invoke("save_clipboard_image", { markdownFilePath, imageData, format });
+}
+
+// Code runs (```bash fences). Output streams over `onEvent` until an `exit`.
+export type RunEvent =
+  | { event: "stdout"; data: string }
+  | { event: "stderr"; data: string }
+  | {
+      event: "exit";
+      data: {
+        code: number | null;
+        cancelled: boolean;
+        truncated: boolean;
+        timedOut: boolean;
+        /** The block's shared session ended with it; the next run starts anew. */
+        sessionEnded: boolean;
+      };
+    };
+
+/** `needsTrust`: nothing ran, because `folder` isn't in Trusted Folders yet. */
+export type RunStart =
+  | { status: "started"; shared: boolean }
+  | { status: "needsTrust"; folder: string };
+
+/** Per-block options from the fence's info string (see `parseFenceOptions`). */
+export interface RunOptions {
+  dir?: string;
+  timeoutSeconds?: number;
+  color: boolean;
+  /** Run on its own instead of in the note's shared session. */
+  fresh: boolean;
+  /** The note's path: blocks with the same key share a session. */
+  sessionKey?: string;
+  /** Variables the note declares (vars blocks, frontmatter `vars:`). */
+  vars?: Record<string, unknown>;
+}
+
+export function runCode(
+  runId: string,
+  lang: string,
+  code: string,
+  cwd: string | null,
+  options: RunOptions,
+  onEvent: (event: RunEvent) => void,
+): Promise<RunStart> {
+  const channel = new Channel<RunEvent>();
+  channel.onmessage = onEvent;
+  return invoke("run_code", { runId, lang, code, cwd, options, onEvent: channel });
+}
+
+export function cancelRun(runId: string): Promise<void> {
+  return invoke("cancel_run", { runId });
+}
+
+/** Send text to a running block's input (a typed line plus "\n"). */
+export function writeRunStdin(runId: string, text: string): Promise<void> {
+  return invoke("write_run_stdin", { runId, text });
+}
+
+/** End a running block's input: the program reads end-of-file. */
+export function closeRunStdin(runId: string): Promise<void> {
+  return invoke("close_run_stdin", { runId });
+}
+
+/** End this window's shared code sessions: one note's, or all. */
+export function endCodeSessions(notePath: string | null): Promise<number> {
+  return invoke("end_code_sessions", { notePath });
 }
