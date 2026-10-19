@@ -2,25 +2,29 @@ import { describe, expect, test, vi } from "vite-plus/test";
 import { EditorState } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { GFM } from "@lezer/markdown";
-import { foldExtension } from "../src/lib/prosemark-core/main";
 import { withFullParse } from "./helpers/parsed-state";
 
 vi.mock("@/lib/tauri", () => ({ runCode: vi.fn(), cancelRun: vi.fn() }));
+vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText: vi.fn() }));
 
-const { codeRunDecorations, runnableLang } =
+const { __testCodeRun, codeRunExtension, formatDuration, runnableLang, stripAnsi } =
   await import("../src/components/editor-area/code-run-decorations");
 
-function runWidgets(doc: string): { pos: number; lang: string; source: string }[] {
-  const state = withFullParse(
+function makeState(doc: string): EditorState {
+  return withFullParse(
     EditorState.create({
       doc,
-      extensions: [markdown({ extensions: [GFM] }), codeRunDecorations(() => "/notes/a.md")],
+      extensions: [markdown({ extensions: [GFM] }), codeRunExtension(() => "/notes/a.md")],
     }),
   );
-  const found: { pos: number; lang: string; source: string }[] = [];
-  state.field(foldExtension).between(0, doc.length, (from, _to, decoration) => {
-    const widget = (decoration.spec as { widget?: { lang?: string; source?: string } }).widget;
-    if (widget?.lang) found.push({ pos: from, lang: widget.lang, source: widget.source ?? "" });
+}
+
+/** Widgets by kind (constructor name) with their document position. */
+function widgets(state: EditorState): { pos: number; kind: string }[] {
+  const found: { pos: number; kind: string }[] = [];
+  state.field(__testCodeRun.decorationsField).between(0, state.doc.length, (from, _to, deco) => {
+    const widget = (deco.spec as { widget?: object }).widget;
+    if (widget) found.push({ pos: from, kind: widget.constructor.name });
   });
   return found;
 }
@@ -38,17 +42,69 @@ describe("runnableLang", () => {
   });
 });
 
-describe("codeRunDecorations", () => {
-  test("puts a run widget after a closed bash fence", () => {
-    const doc = "intro\n\n```bash\necho hi\n```\n\nafter";
-    expect(runWidgets(doc)).toEqual([
-      { pos: doc.indexOf("```\n\nafter") + 3, lang: "bash", source: "echo hi" },
-    ]);
+describe("code run decorations", () => {
+  const doc = "intro\n\n```bash\necho hi\n```\n\nafter";
+  const fenceFrom = doc.indexOf("```bash");
+  const fenceTo = doc.indexOf("```\n\nafter") + 3;
+
+  test("a runnable fence gets a Run button at its start and no tray before it runs", () => {
+    expect(widgets(makeState(doc))).toEqual([{ pos: fenceFrom, kind: "RunToggleWidget" }]);
   });
 
-  test("skips other languages, unclosed fences and empty fences", () => {
-    expect(runWidgets("```python\nprint(1)\n```")).toEqual([]);
-    expect(runWidgets("```bash\necho still typing")).toEqual([]);
-    expect(runWidgets("```bash\n\n```")).toEqual([]);
+  test("other languages, unclosed fences and empty fences get nothing", () => {
+    expect(widgets(makeState("```python\nprint(1)\n```"))).toEqual([]);
+    expect(widgets(makeState("```bash\necho still typing"))).toEqual([]);
+    expect(widgets(makeState("```bash\n\n```"))).toEqual([]);
+  });
+
+  test("a run attaches the output tray under the fence; clearing removes it", () => {
+    const { setRun, clearRun, sessions } = __testCodeRun;
+    sessions.set("r1", {
+      id: "r1",
+      status: "done",
+      exitCode: 0,
+      startedAt: 0,
+      endedAt: 5,
+      chunks: [],
+      held: { stdout: "", stderr: "" },
+      listeners: new Set(),
+    });
+    let state = makeState(doc);
+    state = state.update({ effects: setRun.of({ pos: fenceFrom, id: "r1" }) }).state;
+    expect(widgets(state)).toEqual([
+      { pos: fenceFrom, kind: "RunToggleWidget" },
+      { pos: fenceTo, kind: "RunTrayWidget" },
+    ]);
+
+    // Text typed above the fence moves the run with it.
+    state = state.update({ changes: { from: 0, insert: "new " } }).state;
+    expect(widgets(state).map((w) => w.kind)).toEqual(["RunToggleWidget", "RunTrayWidget"]);
+
+    state = state.update({ effects: clearRun.of("r1") }).state;
+    expect(widgets(state).map((w) => w.kind)).toEqual(["RunToggleWidget"]);
+    sessions.clear();
+  });
+});
+
+describe("stripAnsi", () => {
+  test("removes colour and OSC sequences", () => {
+    expect(stripAnsi("\x1b[32mok\x1b[0m \x1b]0;title\x07done")).toEqual({
+      text: "ok done",
+      rest: "",
+    });
+  });
+
+  test("holds back an escape cut off by a read boundary", () => {
+    const first = stripAnsi("plain \x1b[3");
+    expect(first).toEqual({ text: "plain ", rest: "\x1b[3" });
+    expect(stripAnsi(`${first.rest}1mred\x1b[0m`)).toEqual({ text: "red", rest: "" });
+  });
+});
+
+describe("formatDuration", () => {
+  test("picks ms, seconds or minutes", () => {
+    expect(formatDuration(42.4)).toBe("42ms");
+    expect(formatDuration(3210)).toBe("3.2s");
+    expect(formatDuration(125_000)).toBe("2m 5s");
   });
 });

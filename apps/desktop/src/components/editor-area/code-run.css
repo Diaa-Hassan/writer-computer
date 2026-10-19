@@ -1,54 +1,172 @@
-/* Run bar + output panel under a runnable fence (code-run-decorations.ts).
-   Indented to line up with `.cm-fenced-code-line`'s 6px margin. */
+/* Runnable fences (code-run-decorations.ts): a Run/Stop pill in the block's
+   top-right corner, and an output tray attached under the block once it has
+   run. The tray continues the block's surface so code and result read as one
+   unit; `.cm-code-run-attached` squares off the block's bottom corners. */
 
-.cm-code-run {
-  margin: 4px 0 8px 6px;
+.cm-editor .cm-code-run-corner {
+  float: right;
+  padding: 0.3rem 0.35rem 0 0;
+  line-height: 1;
 }
 
-.cm-code-run-bar {
-  display: flex;
+.cm-editor .cm-code-run-toggle {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
+  gap: 4px;
+  padding: 3px 8px 3px 6px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
   color: var(--text-muted);
-}
-
-.cm-code-run-button {
-  padding: 1px 10px;
-  border-radius: 4px;
-  border: 1px solid var(--border-color);
-  background: var(--surface-card);
-  color: var(--text-secondary);
+  font-family: var(--writer-ui-font, inherit);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
   cursor: pointer;
+  transition:
+    background-color 120ms,
+    color 120ms;
 }
 
-.cm-code-run-button:hover {
+.cm-editor .cm-code-run-toggle svg {
+  width: 12px;
+  height: 12px;
+}
+
+.cm-editor .cm-code-run-toggle:hover {
   background: var(--item-hover-bg);
   color: var(--text-primary);
 }
 
-.cm-code-run-button:focus-visible {
-  outline: 1px solid var(--focus-border);
+.cm-editor .cm-code-run-toggle[data-running="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
 }
 
-.cm-code-run-status[data-failed="true"] {
+.cm-editor .cm-code-run-toggle:focus-visible,
+.cm-editor .cm-code-run-action:focus-visible {
+  outline: 1px solid var(--focus-border);
+  outline-offset: 1px;
+}
+
+.cm-editor .cm-fenced-code-line-last.cm-code-run-attached {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.cm-editor .cm-code-run-tray {
+  margin: 0 0 0.6rem;
+  border-top: 1px solid var(--line-subtler);
+  border-bottom-left-radius: 0.4rem;
+  border-bottom-right-radius: 0.4rem;
+  background: var(--pm-code-background-color);
+}
+
+.cm-editor .cm-code-run-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 0 12px;
+  font-family: var(--writer-ui-font, inherit);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.cm-editor .cm-code-run-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cm-editor .cm-code-run-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-icon-muted);
+}
+
+.cm-editor .cm-code-run-tray[data-status="running"] .cm-code-run-dot {
+  background: var(--accent);
+  animation: cm-code-run-pulse 1.2s ease-in-out infinite;
+}
+
+.cm-editor .cm-code-run-tray[data-status="done"] .cm-code-run-dot {
+  background: #30a46c;
+}
+
+.cm-editor .cm-code-run-tray[data-status="failed"] .cm-code-run-dot {
+  background: #e5484d;
+}
+
+.cm-editor .cm-code-run-tray[data-status="failed"] .cm-code-run-status {
   color: #e5484d;
 }
 
-.cm-code-run-output {
-  margin: 6px 0 0;
-  padding: 8px 12px;
-  max-height: 24em;
+@keyframes cm-code-run-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cm-editor .cm-code-run-tray[data-status="running"] .cm-code-run-dot {
+    animation: none;
+  }
+}
+
+.cm-editor .cm-code-run-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.cm-editor .cm-code-run-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-icon-muted);
+  cursor: pointer;
+}
+
+.cm-editor .cm-code-run-action[hidden] {
+  display: none;
+}
+
+.cm-editor .cm-code-run-action svg {
+  width: 14px;
+  height: 14px;
+}
+
+.cm-editor .cm-code-run-action:hover {
+  background: var(--item-hover-bg);
+  color: var(--text-primary);
+}
+
+.cm-editor .cm-code-run-output {
+  margin: 0;
+  padding: 6px 12px 10px;
+  max-height: 22em;
   overflow: auto;
-  border-radius: 0.4rem;
-  background: var(--code-bg);
   font-family: var(--pm-code-font, ui-monospace, monospace);
   font-size: 0.85em;
+  line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
+  color: var(--text-secondary);
 }
 
-.cm-code-run-stderr {
-  color: #e5484d;
+.cm-editor .cm-code-run-stderr {
+  color: color-mix(in srgb, #e5484d 85%, var(--fg-base));
+}
+
+.cm-editor .cm-code-run-empty {
+  color: var(--text-muted);
+  font-style: italic;
 }

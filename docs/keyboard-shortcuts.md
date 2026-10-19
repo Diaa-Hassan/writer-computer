@@ -63,26 +63,27 @@ These shortcuts are handled by the `markdownFormatting` CodeMirror extension and
 
 Standard editing shortcuts provided by CodeMirror's basic setup.
 
-| Shortcut             | Action                         |
-| -------------------- | ------------------------------ |
-| Cmd+Z                | Undo                           |
-| Cmd+Shift+Z          | Redo                           |
-| Cmd+A                | Select all                     |
-| Cmd+D                | Select next occurrence         |
-| Alt+ArrowUp          | Move line up                   |
-| Alt+ArrowDown        | Move line down                 |
-| Alt+Shift+ArrowUp    | Copy line up                   |
-| Alt+Shift+ArrowDown  | Copy line down                 |
-| Cmd+Shift+K          | Delete line                    |
-| Cmd+Enter            | Insert line below              |
-| Tab                  | Indent / accept completion     |
-| Shift+Tab            | Dedent                         |
-| Cmd+]                | Indent more                    |
-| Cmd+[                | Indent less                    |
-| Cmd+F                | Find                           |
-| Cmd+H                | Find and replace               |
-| Cmd+G                | Find next                      |
-| Cmd+Shift+G          | Find previous                  |
-| Escape               | Close find                     |
-| Alt+Shift+ArrowLeft  | Extend selection by word left  |
-| Alt+Shift+ArrowRight | Extend selection by word right |
+| Shortcut             | Action                                 |
+| -------------------- | -------------------------------------- |
+| Cmd+Z                | Undo                                   |
+| Cmd+Shift+Z          | Redo                                   |
+| Cmd+A                | Select all                             |
+| Cmd+D                | Select next occurrence                 |
+| Alt+ArrowUp          | Move line up                           |
+| Alt+ArrowDown        | Move line down                         |
+| Alt+Shift+ArrowUp    | Copy line up                           |
+| Alt+Shift+ArrowDown  | Copy line down                         |
+| Cmd+Shift+K          | Delete line                            |
+| Cmd+Enter            | Insert line below                      |
+| Alt+Enter            | Run / stop the code block at the caret |
+| Tab                  | Indent / accept completion             |
+| Shift+Tab            | Dedent                                 |
+| Cmd+]                | Indent more                            |
+| Cmd+[                | Indent less                            |
+| Cmd+F                | Find                                   |
+| Cmd+H                | Find and replace                       |
+| Cmd+G                | Find next                              |
+| Cmd+Shift+G          | Find previous                          |
+| Escape               | Close find                             |
+| Alt+Shift+ArrowLeft  | Extend selection by word left          |
+| Alt+Shift+ArrowRight | Extend selection by word right         |
