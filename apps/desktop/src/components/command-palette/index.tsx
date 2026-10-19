@@ -33,6 +33,13 @@ import { useFuzzySearch } from "./use-fuzzy-search";
 import { useGlobalRecentFiles } from "@/hooks/use-global-recent-files";
 import { openStandaloneFile } from "@/hooks/use-open-drop";
 import { settingsKind } from "@/components/editor-area/page-kinds/settings";
+import {
+  activeEditorView,
+  hasRunningCode,
+  runCodeBlocks,
+  runnableFenceStarts,
+  stopCodeRuns,
+} from "@/components/editor-area/code-run-decorations";
 import { getFileName, getFileStem, getParentDir } from "@/lib/paths";
 import * as tauri from "@/lib/tauri";
 import type { RecentFile } from "@/lib/tauri";
@@ -123,6 +130,14 @@ export function CommandPalette() {
     }
     close();
   }
+
+  // Code-run commands act on the visible note's editor, read while the
+  // palette is open (the palette re-renders on open, so this is current).
+  const codeView = isOpen && !isCreateIntent ? activeEditorView() : null;
+  const runnableStarts = codeView ? runnableFenceStarts(codeView.state) : [];
+  const caret = codeView?.state.selection.main.head ?? 0;
+  const hasBlocksAbove = runnableStarts.some((start) => start < caret);
+  const codeRunning = codeView ? hasRunningCode(codeView) : false;
 
   type Command = { id: string; label: string; description: string; run: () => void };
 
@@ -224,6 +239,36 @@ export function CommandPalette() {
         close();
       },
     },
+    codeView &&
+      runnableStarts.length > 0 && {
+        id: "run-all-code-blocks",
+        label: "Run All Code Blocks",
+        description: "⌥⇧↵",
+        run: () => {
+          close();
+          runCodeBlocks(codeView, "all");
+        },
+      },
+    codeView &&
+      hasBlocksAbove && {
+        id: "run-code-blocks-above",
+        label: "Run Code Blocks Above Cursor",
+        description: "Command",
+        run: () => {
+          close();
+          runCodeBlocks(codeView, "above");
+        },
+      },
+    codeView &&
+      codeRunning && {
+        id: "stop-code-runs",
+        label: "Stop All Code Runs",
+        description: "Command",
+        run: () => {
+          close();
+          stopCodeRuns(codeView);
+        },
+      },
     !isCompactFileMode && {
       id: "open-settings",
       label: "Settings",

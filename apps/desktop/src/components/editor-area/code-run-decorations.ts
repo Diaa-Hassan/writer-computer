@@ -1,4 +1,4 @@
-import { syntaxTree } from "@codemirror/language";
+import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import {
   type EditorState,
   type Extension,
@@ -87,6 +87,9 @@ interface Session {
   held: Record<Stream, string>;
   /** Called with a new chunk, or with nothing when the status changed. */
   listeners: Set<(chunk?: Chunk) => void>;
+  /** Resolves with the final status once the run ends (or is dropped). */
+  finished: Promise<RunStatus>;
+  settle: (status: RunStatus) => void;
 }
 
 const sessions = new Map<string, Session>();
@@ -114,12 +117,17 @@ function finishSession(
   session.exitCode = exit.code;
   session.endedAt = performance.now();
   for (const listener of session.listeners) listener();
+  session.settle(session.status);
   if (!deadViews.has(view)) view.dispatch({ effects: sessionChanged.of(null) });
 }
 
 function dropSession(id: string): void {
   const session = sessions.get(id);
-  if (session?.status === "running") void cancelRun(id);
+  if (session?.status === "running") {
+    void cancelRun(id);
+    // Its exit event will be ignored (the session is gone), so settle now.
+    session.settle("stopped");
+  }
   sessions.delete(id);
 }
 
@@ -218,12 +226,14 @@ function runnableFenceAt(state: EditorState, pos: number): RunnableFence | null 
 
 function toggleRun(view: EditorView, fence: RunnableFence): void {
   const existing = sessionAt(view.state, fence.node.from);
-  if (existing?.status === "running") {
-    void cancelRun(existing.id);
-    return;
-  }
+  if (existing?.status === "running") void cancelRun(existing.id);
+  else startRun(view, fence);
+}
 
+function startRun(view: EditorView, fence: RunnableFence): Session {
   const id = crypto.randomUUID();
+  let settle!: (status: RunStatus) => void;
+  const finished = new Promise<RunStatus>((resolve) => (settle = resolve));
   const session: Session = {
     id,
     status: "running",
@@ -233,6 +243,8 @@ function toggleRun(view: EditorView, fence: RunnableFence): void {
     chunks: [],
     held: { stdout: "", stderr: "" },
     listeners: new Set(),
+    finished,
+    settle,
   };
   sessions.set(id, session);
   // Replacing the fence's mark retires its previous session (see runLifecycle).
@@ -250,6 +262,120 @@ function toggleRun(view: EditorView, fence: RunnableFence): void {
     appendChunk(session, "stderr", `${String(err)}\n`);
     finishSession(view, session, { code: null, cancelled: false, truncated: false });
   });
+  return session;
+}
+
+// ---------------------------------------------------------------------------
+// Run All
+// ---------------------------------------------------------------------------
+
+/** A Run All in progress: the fence starts still to run, kept current through
+ *  edits by `runLifecycle`, so typing above a block doesn't derail it. */
+interface Batch {
+  positions: number[];
+  cancelled: boolean;
+}
+
+const batches = new WeakMap<EditorView, Set<Batch>>();
+
+/** Start positions of every runnable fence, in document order; with `before`,
+ *  only fences that end before it. Parses the whole document first, since the
+ *  editor otherwise only parses what is on screen. */
+export function runnableFenceStarts(state: EditorState, before?: number): number[] {
+  const tree = ensureSyntaxTree(state, state.doc.length, 1000) ?? syntaxTree(state);
+  const starts: number[] = [];
+  tree.iterate({
+    enter: (ref) => {
+      if (ref.name !== "FencedCode") return;
+      if ((before === undefined || ref.to < before) && runnableFence(state, ref.node)) {
+        starts.push(ref.from);
+      }
+      return false;
+    },
+  });
+  return starts;
+}
+
+/** Run fences one after another, top to bottom, stopping at the first that
+ *  fails or is stopped. A block already running is waited for, not restarted. */
+async function runSequence(view: EditorView, positions: number[]): Promise<void> {
+  const batch: Batch = { positions, cancelled: false };
+  let running = batches.get(view);
+  if (!running) batches.set(view, (running = new Set()));
+  running.add(batch);
+  try {
+    for (let i = 0; i < batch.positions.length; i++) {
+      if (batch.cancelled || deadViews.has(view)) return;
+      const pos = batch.positions[i];
+      const fence = runnableFenceAt(view.state, pos);
+      // Deleted or no longer runnable since Run All started: skip it.
+      if (!fence || fence.node.from !== pos) continue;
+      const existing = sessionAt(view.state, pos);
+      let status: RunStatus;
+      if (existing?.status === "running") {
+        status = await existing.finished;
+      } else {
+        view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: "nearest", yMargin: 48 }) });
+        status = await startRun(view, fence).finished;
+      }
+      if (status !== "done") return;
+    }
+  } finally {
+    running.delete(batch);
+  }
+}
+
+export type RunScope = "all" | "above";
+
+/** Run every runnable block in the note (`all`), or those above the caret. */
+export function runCodeBlocks(view: EditorView, scope: RunScope): boolean {
+  const before = scope === "above" ? view.state.selection.main.head : undefined;
+  const positions = runnableFenceStarts(view.state, before);
+  if (positions.length === 0) return false;
+  void runSequence(view, positions);
+  return true;
+}
+
+/** Stop every run in the note, and any Run All driving them. */
+export function stopCodeRuns(view: EditorView): boolean {
+  let stopped = false;
+  for (const batch of batches.get(view) ?? []) {
+    batch.cancelled = true;
+    stopped = true;
+  }
+  view.state.field(runsField).between(0, view.state.doc.length, (_from, _to, mark) => {
+    if (sessions.get(mark.id)?.status !== "running") return;
+    void cancelRun(mark.id);
+    stopped = true;
+  });
+  return stopped;
+}
+
+export function hasRunningCode(view: EditorView): boolean {
+  let running = (batches.get(view)?.size ?? 0) > 0;
+  view.state.field(runsField).between(0, view.state.doc.length, (_from, _to, mark) => {
+    if (sessions.get(mark.id)?.status === "running") running = true;
+  });
+  return running;
+}
+
+/** The editor of the visible tab (inactive panes stay mounted, hidden). A
+ *  compact single-file window has no panes, just its one editor. */
+export function activeEditorView(): EditorView | null {
+  const panes = document.querySelectorAll<HTMLElement>("[data-pane]");
+  const candidates =
+    panes.length > 0
+      ? Array.from(panes, (pane) =>
+          pane.classList.contains("invisible")
+            ? null
+            : pane.querySelector<HTMLElement>(".cm-editor"),
+        )
+      : [document.querySelector<HTMLElement>(".cm-editor")];
+  for (const dom of candidates) {
+    const view = dom ? EditorView.findFromDOM(dom) : null;
+    if (view) return view;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +625,12 @@ const decorationsField = StateField.define<DecorationSet>({
  *  re-run, document swapped) and stops them if they are still running. */
 const runLifecycle = ViewPlugin.define((view) => ({
   update(update) {
+    if (update.docChanged) {
+      for (const batch of batches.get(view) ?? []) {
+        // assoc 1: text typed right before a fence keeps pointing at the fence.
+        batch.positions = batch.positions.map((pos) => update.changes.mapPos(pos, 1));
+      }
+    }
     const before = update.startState.field(runsField);
     const after = update.state.field(runsField);
     if (before === after) return;
@@ -510,6 +642,7 @@ const runLifecycle = ViewPlugin.define((view) => ({
   },
   destroy() {
     deadViews.add(view);
+    for (const batch of batches.get(view) ?? []) batch.cancelled = true;
     view.state.field(runsField).between(0, view.state.doc.length, (_from, _to, mark) => {
       dropSession(mark.id);
     });
@@ -527,6 +660,7 @@ const runKeymap = Prec.high(
         return true;
       },
     },
+    { key: "Alt-Shift-Enter", run: (view) => runCodeBlocks(view, "all") },
   ]),
 );
 

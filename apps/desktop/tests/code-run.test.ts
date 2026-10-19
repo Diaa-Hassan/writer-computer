@@ -1,5 +1,8 @@
+// @vitest-environment jsdom
+// jsdom for the Run All tests, which drive a real EditorView.
 import { describe, expect, test, vi } from "vite-plus/test";
-import { EditorState } from "@codemirror/state";
+import { EditorSelection, EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { markdown } from "@codemirror/lang-markdown";
 import { GFM } from "@lezer/markdown";
 import { withFullParse } from "./helpers/parsed-state";
@@ -7,8 +10,25 @@ import { withFullParse } from "./helpers/parsed-state";
 vi.mock("@/lib/tauri", () => ({ runCode: vi.fn(), cancelRun: vi.fn() }));
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText: vi.fn() }));
 
-const { __testCodeRun, codeRunExtension, formatDuration, runnableLang, stripAnsi } =
-  await import("../src/components/editor-area/code-run-decorations");
+// jsdom has no layout; CodeMirror measures text ranges when scrolling a block
+// into view, so give ranges an empty rect list.
+if (!("getClientRects" in Range.prototype)) {
+  Object.assign(Range.prototype, {
+    getClientRects: () => [],
+    getBoundingClientRect: () => new DOMRect(),
+  });
+}
+
+const tauri = await import("../src/lib/tauri");
+const {
+  __testCodeRun,
+  codeRunExtension,
+  formatDuration,
+  runCodeBlocks,
+  runnableFenceStarts,
+  runnableLang,
+  stripAnsi,
+} = await import("../src/components/editor-area/code-run-decorations");
 
 function makeState(doc: string): EditorState {
   return withFullParse(
@@ -75,6 +95,8 @@ describe("code run decorations", () => {
       chunks: [],
       held: { stdout: "", stderr: "" },
       listeners: new Set(),
+      finished: Promise.resolve("done"),
+      settle: () => {},
     });
     let state = makeState(doc);
     state = state.update({ effects: setRun.of({ pos: fenceFrom, id: "r1" }) }).state;
@@ -113,5 +135,74 @@ describe("formatDuration", () => {
     expect(formatDuration(42.4)).toBe("42ms");
     expect(formatDuration(3210)).toBe("3.2s");
     expect(formatDuration(125_000)).toBe("2m 5s");
+  });
+});
+
+describe("Run All", () => {
+  const doc = [
+    "```bash\necho one\n```",
+    "```python\nprint('skip me? no, I run')\n```",
+    "```bash\nexit 1\n```",
+    "```bash\necho never\n```",
+  ].join("\n\n");
+
+  /** Fake backend: each run exits with the next code, after a tick. */
+  function fakeRuns(exitCodes: number[]): string[] {
+    const ran: string[] = [];
+    vi.mocked(tauri.runCode).mockReset();
+    vi.mocked(tauri.runCode).mockImplementation(async (_id, _lang, code, _cwd, onEvent) => {
+      ran.push(code.trim());
+      const exit = exitCodes.shift() ?? 0;
+      setTimeout(() =>
+        onEvent({ event: "exit", data: { code: exit, cancelled: false, truncated: false } }),
+      );
+    });
+    return ran;
+  }
+
+  function makeView(anchor = 0): EditorView {
+    return new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc,
+        selection: EditorSelection.single(anchor),
+        extensions: [markdown({ extensions: [GFM] }), codeRunExtension(() => "/notes/a.md")],
+      }),
+    });
+  }
+
+  const settled = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  test("finds every runnable fence in order", () => {
+    expect(runnableFenceStarts(EditorState.create({ doc, extensions: [markdown()] }))).toHaveLength(
+      4,
+    );
+  });
+
+  test("runs top to bottom and stops at the first failure", async () => {
+    const ran = fakeRuns([0, 0, 1, 0]);
+    const view = makeView();
+    expect(runCodeBlocks(view, "all")).toBe(true);
+    await settled();
+    expect(ran).toEqual(["echo one", "print('skip me? no, I run')", "exit 1"]);
+    view.destroy();
+  });
+
+  test("above runs only the blocks that end before the caret", async () => {
+    const ran = fakeRuns([0, 0, 0, 0]);
+    const view = makeView(doc.indexOf("exit 1"));
+    expect(runCodeBlocks(view, "above")).toBe(true);
+    await settled();
+    expect(ran).toEqual(["echo one", "print('skip me? no, I run')"]);
+    view.destroy();
+  });
+
+  test("does nothing in a note without runnable blocks", () => {
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({ doc: "just prose", extensions: [codeRunExtension(() => "")] }),
+    });
+    expect(runCodeBlocks(view, "all")).toBe(false);
+    view.destroy();
   });
 });

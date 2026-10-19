@@ -76,6 +76,7 @@ Standard editing shortcuts provided by CodeMirror's basic setup.
 | Cmd+Shift+K          | Delete line                            |
 | Cmd+Enter            | Insert line below                      |
 | Alt+Enter            | Run / stop the code block at the caret |
+| Alt+Shift+Enter      | Run all code blocks in the note        |
 | Tab                  | Indent / accept completion             |
 | Shift+Tab            | Dedent                                 |
 | Cmd+]                | Indent more                            |

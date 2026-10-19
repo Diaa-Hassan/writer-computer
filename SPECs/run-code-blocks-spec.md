@@ -39,9 +39,16 @@ Known limits: Ruby, Perl and Lua buffer output when it isn't a terminal, so thei
 - **Environment:** the app's environment with `PATH` replaced by the login shell's (see Languages). No stdin: a block that reads input gets end-of-file.
 - **Run control:** a quiet `▶ Run` pill floated into the fence's first line (the hidden ```marker line), so it sits in the block's top-right corner. While running it becomes an accent-tinted`■ Stop`. **⌥↵** (Alt+Enter) runs or stops the runnable block containing the caret; it falls through when the caret isn't in one.
 - **Output tray:** appears only after the first run, attached to the block's bottom edge (the last code line loses its bottom radius, the tray continues the code surface with a hairline divider). Header: status dot + text — `Running · 3.2s` (pulsing accent dot, live timer; no pulse under reduced motion), `Done · 120ms` (green), `Exit 2 · 40ms` (red), `Stopped · 4.1s` — and actions Copy output, Run again (hidden while running) and Clear (removes the tray; stops the run if it is still going). Body: stdout, stderr in red, terminal escape codes stripped (a code split across reads is held back until complete), `No output` when the run printed nothing. The body caps at 22em and scrolls; it follows new output only while scrolled to the bottom.
-- **Output lifetime:** kept in memory, never written to the note. It belongs to the fence, not to the widget DOM: the fence's start carries a mark (a `RangeSet` in editor state, mapped through edits) holding the id of its latest run, so output survives edits and scrolling the block out of view. Re-running replaces it. The run is stopped and its output dropped when the mark goes away: the fence is deleted, Clear is pressed, the tab switches to another document, or the editor closes.
+- **Output lifetime:** kept in memory, never written to the note. It belongs to the fence, not to the widget DOM: the fence's start carries a mark (a `RangeSet` in editor state, mapped through edits) holding the id of its latest run, so output survives edits and scrolling the block out of view. Re-running replaces it. The run is stopped and its output dropped when the mark goes away: the fence is deleted, Clear is pressed, the editor reuses the tab for another document, or the tab is closed. Switching tabs does not: inactive tabs stay mounted, so their runs continue.
 - **Stop** kills the run's whole process group (`SIGKILL`), so children such as `sleep` stop too.
 - **Limits:** a run that prints more than 1 MiB (stdout + stderr) is stopped and the panel says so.
+
+## Run All
+
+- **Commands** (⌘P, shown only when the visible note has runnable blocks): **Run All Code Blocks** (also **⌥⇧↵**), **Run Code Blocks Above Cursor** (blocks that end before the caret, so not the one the caret is in), and **Stop All Code Runs** (while anything in the note is running).
+- Blocks run **one at a time, top to bottom**, each scrolled into view as it starts, and the sequence **stops at the first block that fails or is stopped**. A block that is already running is waited for, not restarted.
+- Edits during a Run All don't derail it: the queued fence positions are mapped through every change, a block deleted meanwhile is skipped.
+- The palette acts on the visible tab's editor (`activeEditorView`: inactive panes stay mounted but carry `invisible`; a compact window has a single editor).
 
 ## Design
 
@@ -61,4 +68,4 @@ Add a `Runtime` to `RUNTIMES` in `commands/run.rs` (its tools, each `inline(prog
 - Shared state between blocks, variables across blocks or languages.
 - Interactive stdin, a terminal/TTY, rendering colours (escape codes are stripped, not drawn).
 - Saving output into the note.
-- Running from Reading/preview surfaces other than the editor, or a Run All command.
+- Running from Reading/preview surfaces other than the editor.
