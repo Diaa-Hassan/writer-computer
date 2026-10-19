@@ -109,13 +109,12 @@ fn parse_config_with_defaults(
                 };
                 list_keys.insert(key, vec![first, value_str]);
             } else {
-                let value = if matches!(
-                    defaults.and_then(|values| values.get(&key)),
-                    Some(ConfigValue::String(_))
-                ) {
-                    ConfigValue::String(value_str)
-                } else {
-                    parse_value(&value_str)
+                let value = match defaults.and_then(|values| values.get(&key)) {
+                    Some(ConfigValue::String(_)) => ConfigValue::String(value_str),
+                    // A list with one entry is written as a single line, so
+                    // only the schema can tell it apart from a scalar.
+                    Some(ConfigValue::List(_)) => ConfigValue::List(vec![value_str]),
+                    _ => parse_value(&value_str),
                 };
                 map.insert(key, value);
             }
@@ -644,6 +643,29 @@ mod tests {
         );
         assert_eq!(result.get("number"), Some(&ConfigValue::Number(42.0)));
         assert_eq!(result.get("bool"), Some(&ConfigValue::Bool(true)));
+    }
+
+    #[test]
+    fn test_single_entry_list_round_trips_as_a_list() {
+        // One entry is written as one line, indistinguishable from a scalar
+        // without the schema: it must come back as a one-item list.
+        let defaults = default_settings();
+        let input = "code.trusted-folders = /Users/me/notes\nfiles.associations = *.md\n";
+        let result = parse_config_with_defaults(input, Some(&defaults));
+        assert_eq!(
+            result.get("code.trusted-folders"),
+            Some(&ConfigValue::List(vec!["/Users/me/notes".into()]))
+        );
+        assert_eq!(
+            result.get("files.associations"),
+            Some(&ConfigValue::List(vec!["*.md".into()]))
+        );
+        // Repeated keys still accumulate.
+        let two = "files.associations = *.md\nfiles.associations = *.txt\n";
+        assert_eq!(
+            parse_config_with_defaults(two, Some(&defaults)).get("files.associations"),
+            Some(&ConfigValue::List(vec!["*.md".into(), "*.txt".into()]))
+        );
     }
 
     #[test]

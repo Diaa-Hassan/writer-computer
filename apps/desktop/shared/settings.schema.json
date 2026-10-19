@@ -406,6 +406,15 @@
       "default": []
     },
     {
+      "key": "code.trusted-folders",
+      "label": "Trusted Folders",
+      "description": "Folders where code blocks may run. Writer asks the first time you run code in a new workspace (or, for a file opened on its own, its folder) and adds it here. Remove an entry to be asked again.",
+      "category": "Code",
+      "type": "list",
+      "scope": "global",
+      "default": []
+    },
+    {
       "key": "telemetry.enabled",
       "label": "Share Usage Data",
       "description": "Send usage events (app opened, workspace opened, file and folder created) to help decide what to build next. Off until you turn it on. Never includes your documents, file names, or paths; the full list is in the Telemetry doc in Writer's repository.",

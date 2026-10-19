@@ -313,13 +313,16 @@ export type RunEvent =
       data: { code: number | null; cancelled: boolean; truncated: boolean; timedOut: boolean };
     };
 
+/** `needsTrust`: nothing ran, because `folder` isn't in Trusted Folders yet. */
+export type RunStart = { status: "started" } | { status: "needsTrust"; folder: string };
+
 export function runCode(
   runId: string,
   lang: string,
   code: string,
   cwd: string | null,
   onEvent: (event: RunEvent) => void,
-): Promise<void> {
+): Promise<RunStart> {
   const channel = new Channel<RunEvent>();
   channel.onmessage = onEvent;
   return invoke("run_code", { runId, lang, code, cwd, onEvent: channel });

@@ -339,11 +339,20 @@ fn kill_group(_pid: u32) {}
 const ENABLED_KEY: &str = "code.run-enabled";
 const TIMEOUT_KEY: &str = "code.timeout-seconds";
 const INTERPRETERS_KEY: &str = "code.interpreters";
+const TRUSTED_KEY: &str = "code.trusted-folders";
 
 struct RunSettings {
     enabled: bool,
     timeout: Option<Duration>,
     interpreters: Vec<String>,
+    trusted: Vec<String>,
+}
+
+fn list_setting(settings: &crate::config::Settings, key: &str) -> Vec<String> {
+    match settings.get(key) {
+        Some(ConfigValue::List(entries)) => entries.clone(),
+        _ => Vec::new(),
+    }
 }
 
 fn run_settings(app: &tauri::AppHandle, label: &str) -> Result<RunSettings, AppError> {
@@ -363,10 +372,40 @@ fn run_settings(app: &tauri::AppHandle, label: &str) -> Result<RunSettings, AppE
             .and_then(ConfigValue::as_bool)
             .unwrap_or(true),
         timeout,
-        interpreters: match settings.get(INTERPRETERS_KEY) {
-            Some(ConfigValue::List(entries)) => entries.clone(),
-            _ => Vec::new(),
-        },
+        interpreters: list_setting(settings, INTERPRETERS_KEY),
+        trusted: list_setting(settings, TRUSTED_KEY),
+    })
+}
+
+/// What run_code did: started the run, or declined because the folder hasn't
+/// been trusted yet (the editor asks, adds it to Trusted Folders, retries).
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum RunStart {
+    Started,
+    NeedsTrust { folder: String },
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The folder a run's trust is decided for: the workspace when the note is
+/// inside it, otherwise the note's own folder (a file opened on its own).
+fn trust_folder(cwd: &Path, workspace_root: Option<&Path>) -> PathBuf {
+    let cwd = canonical(cwd);
+    match workspace_root.map(canonical) {
+        Some(root) if cwd.starts_with(&root) => root,
+        _ => cwd,
+    }
+}
+
+/// Trusting a folder trusts everything below it.
+fn is_trusted(folder: &Path, trusted: &[String]) -> bool {
+    trusted.iter().map(|entry| entry.trim()).any(|entry| {
+        !entry.is_empty()
+            && Path::new(entry).is_absolute()
+            && folder.starts_with(canonical(Path::new(entry)))
     })
 }
 
@@ -450,12 +489,27 @@ pub fn run_code(
     cwd: Option<String>,
     on_event: Channel<RunEvent>,
     registry: State<'_, Arc<RunRegistry>>,
-) -> Result<(), AppError> {
+) -> Result<RunStart, AppError> {
     let settings = run_settings(&app, webview.label())?;
     if !settings.enabled {
         return Err(AppError::Message(
             "Running code is turned off in Settings (Code → Run Code Blocks)".into(),
         ));
+    }
+    let cwd = cwd.filter(|dir| Path::new(dir).is_dir());
+    // A note that was never saved has no folder; it is the user's own text.
+    if let Some(dir) = cwd.as_deref() {
+        let workspace = app
+            .state::<AppState>()
+            .get_or_create(webview.label())
+            .workspace_snapshot()
+            .map(|(root, _)| root);
+        let folder = trust_folder(Path::new(dir), workspace.as_deref());
+        if !is_trusted(&folder, &settings.trusted) {
+            return Ok(RunStart::NeedsTrust {
+                folder: folder.to_string_lossy().into_owned(),
+            });
+        }
     }
     let runtime =
         runtime(&lang).ok_or_else(|| AppError::Unsupported(format!("no runtime for `{lang}`")))?;
@@ -486,7 +540,7 @@ pub fn run_code(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(dir) = cwd.as_deref().filter(|d| Path::new(d).is_dir()) {
+    if let Some(dir) = cwd.as_deref() {
         command.current_dir(dir);
     }
     #[cfg(unix)]
@@ -599,7 +653,7 @@ pub fn run_code(
         });
     });
 
-    Ok(())
+    Ok(RunStart::Started)
 }
 
 #[tauri::command]
@@ -675,10 +729,52 @@ mod tests {
         // these were workspace-scoped, opening a cloned repo could enable
         // running or swap in its own interpreter.
         let schema = crate::config::settings_schema();
-        for key in [ENABLED_KEY, TIMEOUT_KEY, INTERPRETERS_KEY] {
+        for key in [ENABLED_KEY, TIMEOUT_KEY, INTERPRETERS_KEY, TRUSTED_KEY] {
             let def = schema.iter().find(|d| d.key == key).expect(key);
-            assert_eq!(def.scope, Some(crate::config::SettingScope::Global), "{key}");
+            assert_eq!(
+                def.scope,
+                Some(crate::config::SettingScope::Global),
+                "{key}"
+            );
         }
+    }
+
+    #[test]
+    fn trust_is_decided_for_the_workspace_or_the_note_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical(dir.path());
+        let notes = root.join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            trust_folder(&notes, Some(&root)),
+            root,
+            "inside the workspace"
+        );
+        assert_eq!(
+            trust_folder(elsewhere.path(), Some(&root)),
+            canonical(elsewhere.path()),
+            "a file outside the workspace is judged by its own folder"
+        );
+        assert_eq!(trust_folder(&notes, None), notes, "no workspace");
+    }
+
+    #[test]
+    fn trusting_a_folder_covers_its_subfolders_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical(dir.path());
+        let sub = root.join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+        let trusted = vec![format!("  {}  ", root.join("a").display())];
+
+        assert!(is_trusted(&sub, &trusted));
+        assert!(is_trusted(&root.join("a"), &trusted));
+        assert!(!is_trusted(&root, &trusted), "the parent isn't trusted");
+        // `/x/ab` must not count as inside `/x/a`.
+        std::fs::create_dir_all(root.join("ab")).unwrap();
+        assert!(!is_trusted(&root.join("ab"), &trusted));
+        assert!(!is_trusted(&root, &["".into(), "relative/path".into()]));
     }
 
     #[test]

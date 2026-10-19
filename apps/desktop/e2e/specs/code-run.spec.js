@@ -87,6 +87,9 @@ describe("Running code blocks", function () {
     root = recents.ok && Array.isArray(recents.value) ? recents.value[0] : null;
     ok(root, "no workspace root to seed the document into");
 
+    // Trust the workspace up front; the permission prompt has its own test
+    // in code-run-settings.spec.js.
+    await invoke("set_setting", { key: "code.trusted-folders", value: [root], scope: "global" });
     filePath = `${root}/${FILE_STEM}.md`;
     // Written from outside the app so the file watcher picks it up as a new
     // file; the app's own `write_file` is skipped by self-write detection.
@@ -98,6 +101,9 @@ describe("Running code blocks", function () {
   });
 
   after(async function () {
+    if (workspaceRestored) {
+      await invoke("reset_setting", { key: "code.trusted-folders", scope: "global" });
+    }
     if (filePath) rmSync(filePath, { force: true });
   });
 

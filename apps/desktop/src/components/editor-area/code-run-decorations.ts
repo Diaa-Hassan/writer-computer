@@ -71,7 +71,7 @@ export function formatDuration(ms: number): string {
 // ---------------------------------------------------------------------------
 
 type Stream = "stdout" | "stderr";
-type RunStatus = "running" | "done" | "failed" | "stopped" | "timedout";
+type RunStatus = "running" | "needs-trust" | "done" | "failed" | "stopped" | "timedout";
 
 interface Chunk {
   stream: Stream;
@@ -91,7 +91,14 @@ interface Session {
   /** Resolves with the final status once the run ends (or is dropped). */
   finished: Promise<RunStatus>;
   settle: (status: RunStatus) => void;
+  /** While `needs-trust`: the folder to allow, and how to start once allowed. */
+  trustFolder: string | null;
+  launch: () => void;
 }
+
+/** Running, or waiting for the user to allow its folder. */
+const isActive = (session: Session | undefined): boolean =>
+  session?.status === "running" || session?.status === "needs-trust";
 
 const sessions = new Map<string, Session>();
 // Views that have been destroyed; a run finishing later must not dispatch.
@@ -123,15 +130,14 @@ function finishSession(
         : "failed";
   session.exitCode = exit.code;
   session.endedAt = performance.now();
-  for (const listener of session.listeners) listener();
   session.settle(session.status);
-  if (!deadViews.has(view)) view.dispatch({ effects: sessionChanged.of(null) });
+  notify(view, session);
 }
 
 function dropSession(id: string): void {
   const session = sessions.get(id);
-  if (session?.status === "running") {
-    void cancelRun(id);
+  if (isActive(session) && session) {
+    if (session.status === "running") void cancelRun(id);
     // Its exit event will be ignored (the session is gone), so settle now.
     session.settle("stopped");
   }
@@ -250,10 +256,64 @@ function runnableFenceAt(state: EditorState, pos: number): RunnableFence | null 
   return null;
 }
 
+function stopSession(view: EditorView, session: Session): void {
+  if (session.status === "running") void cancelRun(session.id);
+  else if (session.status === "needs-trust") declineTrust(view, session);
+}
+
 function toggleRun(view: EditorView, fence: RunnableFence): void {
   const existing = sessionAt(view.state, fence.node.from);
-  if (existing?.status === "running") void cancelRun(existing.id);
+  if (existing && isActive(existing)) stopSession(view, existing);
   else startRun(view, fence);
+}
+
+// ---------------------------------------------------------------------------
+// Trusted Folders: the backend refuses to run outside them and says which
+// folder to ask about; the tray asks, and Allow adds it to the setting.
+// ---------------------------------------------------------------------------
+
+const TRUSTED_SETTING = "code.trusted-folders";
+
+function notify(view: EditorView, session: Session): void {
+  for (const listener of session.listeners) listener();
+  if (!deadViews.has(view)) view.dispatch({ effects: sessionChanged.of(null) });
+}
+
+function declineTrust(view: EditorView, session: Session): void {
+  session.trustFolder = null;
+  finishSession(view, session, { code: null, cancelled: true, truncated: false, timedOut: false });
+}
+
+async function allowTrust(view: EditorView, session: Session): Promise<void> {
+  const folder = session.trustFolder;
+  if (session.status !== "needs-trust" || !folder) return;
+  const store = useSettingsStore.getState();
+  const current = store.settings[TRUSTED_SETTING];
+  const trusted = Array.isArray(current) ? (current as string[]) : [];
+  try {
+    if (!trusted.includes(folder)) {
+      await store.setSetting(TRUSTED_SETTING, [...trusted, folder], "global");
+    }
+  } catch (err) {
+    session.trustFolder = null;
+    appendChunk(session, "stderr", `Couldn't save Trusted Folders: ${String(err)}\n`);
+    finishSession(view, session, {
+      code: null,
+      cancelled: false,
+      truncated: false,
+      timedOut: false,
+    });
+    return;
+  }
+  // Every block waiting on this folder can go now, not just the one clicked.
+  for (const waiting of sessions.values()) {
+    if (waiting.status !== "needs-trust" || waiting.trustFolder !== folder) continue;
+    waiting.status = "running";
+    waiting.trustFolder = null;
+    waiting.startedAt = performance.now();
+    waiting.launch();
+  }
+  notify(view, session);
 }
 
 function startRun(view: EditorView, fence: RunnableFence): Session {
@@ -271,6 +331,8 @@ function startRun(view: EditorView, fence: RunnableFence): Session {
     listeners: new Set(),
     finished,
     settle,
+    trustFolder: null,
+    launch: () => {},
   };
   sessions.set(id, session);
   // Replacing the fence's mark retires its previous session (see runLifecycle).
@@ -283,7 +345,17 @@ function startRun(view: EditorView, fence: RunnableFence): Session {
     if (event.event === "exit") finishSession(view, session, event.data);
     else appendChunk(session, event.event, event.data);
   };
-  runCode(id, fence.lang, fence.source, cwd, onEvent).catch((err: unknown) => {
+  session.launch = () => {
+    runCode(id, fence.lang, fence.source, cwd, onEvent)
+      .then((start) => {
+        if (start.status !== "needsTrust" || session.status !== "running") return;
+        session.status = "needs-trust";
+        session.trustFolder = start.folder;
+        notify(view, session);
+      })
+      .catch(onLaunchError);
+  };
+  const onLaunchError = (err: unknown) => {
     if (session.status !== "running") return;
     appendChunk(session, "stderr", `${String(err)}\n`);
     finishSession(view, session, {
@@ -292,7 +364,8 @@ function startRun(view: EditorView, fence: RunnableFence): Session {
       truncated: false,
       timedOut: false,
     });
-  });
+  };
+  session.launch();
   return session;
 }
 
@@ -345,7 +418,7 @@ async function runSequence(view: EditorView, positions: number[]): Promise<void>
       if (!fence || fence.node.from !== pos) continue;
       const existing = sessionAt(view.state, pos);
       let status: RunStatus;
-      if (existing?.status === "running") {
+      if (existing && isActive(existing)) {
         status = await existing.finished;
       } else {
         view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: "nearest", yMargin: 48 }) });
@@ -377,8 +450,9 @@ export function stopCodeRuns(view: EditorView): boolean {
     stopped = true;
   }
   view.state.field(runsField).between(0, view.state.doc.length, (_from, _to, mark) => {
-    if (sessions.get(mark.id)?.status !== "running") return;
-    void cancelRun(mark.id);
+    const session = sessions.get(mark.id);
+    if (!session || !isActive(session)) return;
+    stopSession(view, session);
     stopped = true;
   });
   return stopped;
@@ -387,7 +461,7 @@ export function stopCodeRuns(view: EditorView): boolean {
 export function hasRunningCode(view: EditorView): boolean {
   let running = (batches.get(view)?.size ?? 0) > 0;
   view.state.field(runsField).between(0, view.state.doc.length, (_from, _to, mark) => {
-    if (sessions.get(mark.id)?.status === "running") running = true;
+    if (isActive(sessions.get(mark.id))) running = true;
   });
   return running;
 }
@@ -450,6 +524,20 @@ function iconButton(
   return button;
 }
 
+function textButton(className: string, label: string, onClick: () => void): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  // Keep the editor focused; see docs/editor.md "Buttons inside widgets".
+  button.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  button.addEventListener("click", onClick);
+  return button;
+}
+
 function fenceAtDOM(view: EditorView, el: HTMLElement): RunnableFence | null {
   return runnableFenceAt(view.state, view.posAtDOM(el));
 }
@@ -498,6 +586,8 @@ function statusText(session: Session, now: number): string {
       return `Done · ${elapsed}`;
     case "stopped":
       return `Stopped · ${elapsed}`;
+    case "needs-trust":
+      return "Waiting for permission";
     case "timedout":
       return `Time limit reached · ${elapsed}`;
     case "failed":
@@ -550,6 +640,25 @@ class RunTrayWidget extends WidgetType {
     });
     actions.append(copy, rerun, clear);
 
+    // Shown instead of output while the folder waits for permission.
+    const trust = tray.appendChild(document.createElement("div"));
+    trust.className = "cm-code-run-trust";
+    const question = trust.appendChild(document.createElement("p"));
+    question.textContent =
+      "Code hasn't run in this folder before. It runs as you, with access to your files, so only allow folders whose code you trust.";
+    const folder = trust.appendChild(document.createElement("code"));
+    folder.className = "cm-code-run-trust-folder";
+    const choices = trust.appendChild(document.createElement("div"));
+    choices.className = "cm-code-run-trust-actions";
+    choices.append(
+      textButton(
+        "cm-code-run-trust-allow",
+        "Allow this folder",
+        () => void allowTrust(view, session),
+      ),
+      textButton("cm-code-run-trust-cancel", "Cancel", () => declineTrust(view, session)),
+    );
+
     const output = tray.appendChild(document.createElement("pre"));
     output.className = "cm-code-run-output";
     const empty = document.createElement("span");
@@ -560,9 +669,13 @@ class RunTrayWidget extends WidgetType {
     const renderStatus = () => {
       tray.dataset.status = session.status;
       statusLabel.textContent = statusText(session, performance.now());
-      rerun.hidden = session.status === "running";
+      const waiting = session.status === "needs-trust";
+      trust.hidden = !waiting;
+      output.hidden = waiting;
+      folder.textContent = session.trustFolder ?? "";
+      rerun.hidden = isActive(session);
       copy.hidden = session.chunks.length === 0;
-      if (session.status !== "running" && session.chunks.length === 0 && !empty.isConnected) {
+      if (!isActive(session) && session.chunks.length === 0 && !empty.isConnected) {
         output.append(empty);
       }
       if (session.status === "running") {
@@ -623,7 +736,7 @@ function buildDecorations(state: EditorState): DecorationSet {
       // the marker doesn't swallow the button.
       ranges.push(
         Decoration.widget({
-          widget: new RunToggleWidget(session?.status === "running"),
+          widget: new RunToggleWidget(isActive(session)),
           side: -1,
         }).range(ref.from),
       );

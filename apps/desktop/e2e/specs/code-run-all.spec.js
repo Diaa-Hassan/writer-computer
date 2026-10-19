@@ -56,6 +56,15 @@ describe("Run All code blocks", function () {
         .catch(() => done(null));
     });
     ok(root, "no workspace root to seed the document into");
+    // Trust the workspace up front (see code-run-settings.spec.js for the prompt).
+    await browser.executeAsync((folder, done) => {
+      window.__TAURI_INTERNALS__
+        .invoke("set_setting", { key: "code.trusted-folders", value: [folder], scope: "global" })
+        .then(
+          () => done(),
+          () => done(),
+        );
+    }, root);
     filePath = `${root}/code-run-all-e2e.md`;
     // From outside the app so the watcher lists it (see code-run.spec.js).
     writeFileSync(filePath, DOC);
@@ -65,7 +74,17 @@ describe("Run All code blocks", function () {
     if (!workspaceRestored) this.skip();
   });
 
-  after(function () {
+  after(async function () {
+    if (workspaceRestored) {
+      await browser.executeAsync((done) => {
+        window.__TAURI_INTERNALS__
+          .invoke("reset_setting", { key: "code.trusted-folders", scope: "global" })
+          .then(
+            () => done(),
+            () => done(),
+          );
+      });
+    }
     if (filePath) rmSync(filePath, { force: true });
   });
 

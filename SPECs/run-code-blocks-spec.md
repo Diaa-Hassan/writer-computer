@@ -58,6 +58,15 @@ All three are `"scope": "global"`, and a Rust test fails if that ever changes. W
 - **Run Time Limit** (`code.timeout-seconds`, default 0 = none). A watchdog kills the run's process group when it's exceeded; the tray shows `Time limit reached · 30.0s` in red, and Run All stops there.
 - **Interpreters** (`code.interpreters`, list of `language=absolute path`, language may be an alias). Replaces the PATH lookup for that language. The tool whose program name matches the file name supplies the arguments (`typescript=/opt/homebrew/bin/deno` → `deno run -A`), otherwise the language's first tool (`python=/…/.venv/bin/python3.12` → `-u -c`). A malformed entry or a path that isn't an existing absolute file is reported in the tray instead of falling back silently.
 
+## Trusted Folders
+
+- The first Run in a folder doesn't run: the backend checks the note's **trust folder** (the workspace root when the note is inside the open workspace, otherwise the note's own folder) against **Trusted Folders** (`code.trusted-folders`, global scope like the other code settings) and answers `{ status: "needsTrust", folder }` without starting anything.
+- The tray then shows _Waiting for permission_: "Code hasn't run in this folder before. It runs as you, with access to your files, so only allow folders whose code you trust.", the folder path, and **Allow this folder** / **Cancel**. The corner pill reads Stop, and Stop/⌥↵ cancel the prompt too.
+- **Allow** appends the folder to Trusted Folders (through the settings store, the one write path) and starts every block waiting on that folder; a Run All that was waiting carries on. **Cancel** ends the block as Stopped and stops the Run All.
+- Trusting a folder trusts its subfolders (`starts_with` on canonical paths, so symlinked paths like `/tmp` → `/private/tmp` match, and `/x/ab` is not inside `/x/a`). Relative or empty entries never match. Notes that were never saved (no folder) run without asking: the text is the user's own.
+- Trusted Folders is editable in Settings → Code; removing an entry makes Writer ask again.
+- Single-entry list settings: the config file writes a list as one `key = value` line per item, so a one-item list used to read back from disk as a string and the trust check saw no folders. The parser now uses the schema default's type (`List`) to keep it a list; this also fixes one-entry Interpreters and File Associations.
+
 ## Design
 
 - `shared/code-runtimes.json` maps every fence language and alias → runtime id. The editor reads it to decide where to show Run and sends the id; `RUNTIMES` in `commands/run.rs` holds each runtime's tools. A test checks every mapped id exists and every runtime is reachable under its own name.

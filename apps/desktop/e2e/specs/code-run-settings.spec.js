@@ -1,7 +1,8 @@
 import { ok, strictEqual } from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
 
-// Code settings: seeds a note, then checks the Run Time Limit stops a slow
+// Code settings: seeds a note, then checks the first run in the folder asks
+// for permission and Allow adds it to Trusted Folders, the Run Time Limit stops a slow
 // block, an Interpreters entry replaces a language's program, and turning
 // off Run Code Blocks in Settings removes the Run buttons
 // (see SPECs/run-code-blocks-spec.md).
@@ -24,6 +25,7 @@ describe("Code run settings", function () {
   ].join("\n");
 
   let workspaceRestored = false;
+  let root = null;
   let filePath = null;
 
   async function invoke(cmd, args) {
@@ -61,7 +63,8 @@ describe("Code run settings", function () {
       .catch(() => false);
     if (!workspaceRestored) return;
     const recents = await invoke("get_recent_workspaces", {});
-    const root = recents.ok ? recents.value[0] : null;
+    root = recents.ok ? recents.value[0] : null;
+    await invoke("reset_setting", { key: "code.trusted-folders", scope: "global" });
     ok(root, "no workspace root to seed the document into");
     filePath = `${root}/code-run-settings-e2e.md`;
     // From outside the app so the watcher lists it (see code-run.spec.js).
@@ -74,14 +77,18 @@ describe("Code run settings", function () {
 
   after(async function () {
     if (!workspaceRestored) return;
-    for (const key of ["code.timeout-seconds", "code.interpreters", "code.run-enabled"]) {
+    for (const key of [
+      "code.timeout-seconds",
+      "code.interpreters",
+      "code.run-enabled",
+      "code.trusted-folders",
+    ]) {
       await invoke("reset_setting", { key, scope: "global" });
     }
     if (filePath) rmSync(filePath, { force: true });
   });
 
-  it("stops a block at the time limit", async function () {
-    ok((await setGlobal("code.timeout-seconds", 1)).ok, "could not set the time limit");
+  it("asks before the first run in a folder, and Allow trusts it", async function () {
     const row = await $(`span*=Run settings check`);
     await row.waitForExist({ timeout: 15_000 });
     await row.click();
@@ -89,6 +96,34 @@ describe("Code run settings", function () {
       timeout: 10_000,
       timeoutMsg: "run buttons never rendered",
     });
+
+    await clickToggle(1);
+    await browser.waitUntil(async () => (await trays())[0]?.state === "needs-trust", {
+      timeout: 10_000,
+      timeoutMsg: "no permission prompt for an untrusted folder",
+    });
+    const shown = await browser.execute(
+      () => document.querySelector(".cm-code-run-trust-folder")?.textContent,
+    );
+    ok(shown && shown.endsWith(root.split("/").pop()), `prompt names ${shown}`);
+    if (process.env.VERIFY_SHOT_DIR) {
+      await browser.saveScreenshot(`${process.env.VERIFY_SHOT_DIR}/code-run-trust.png`);
+    }
+
+    await (await $(".cm-code-run-trust-allow")).click();
+    await browser.waitUntil(async () => (await trays())[0]?.state === "done", {
+      timeout: 10_000,
+      timeoutMsg: "the block didn't run after Allow",
+    });
+    const saved = await invoke("get_setting", { key: "code.trusted-folders" });
+    ok(
+      saved.ok && JSON.stringify(saved.value).includes(root.split("/").pop()),
+      JSON.stringify(saved),
+    );
+  });
+
+  it("stops a block at the time limit", async function () {
+    ok((await setGlobal("code.timeout-seconds", 1)).ok, "could not set the time limit");
 
     await clickToggle(0);
     await browser.waitUntil(async () => (await trays())[0]?.state === "timedout", {
@@ -103,9 +138,11 @@ describe("Code run settings", function () {
   it("runs a language with the interpreter set in Settings", async function () {
     ok((await setGlobal("code.interpreters", ["sh=/bin/zsh"])).ok, "could not set interpreters");
     await clickToggle(1);
-    await browser.waitUntil(async () => (await trays())[1]?.state === "done", {
+    // This block already ran once (the permission test), so wait for the new
+    // output rather than a "done" status that is already there.
+    await browser.waitUntil(async () => /^zsh:\d/.test((await trays())[1]?.text ?? ""), {
       timeout: 10_000,
-      timeoutMsg: "the sh block never finished",
+      timeoutMsg: "the sh block never ran with zsh",
     });
     ok(/^zsh:\d/.test((await trays())[1].text), (await trays())[1].text);
   });

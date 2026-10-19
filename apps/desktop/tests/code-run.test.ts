@@ -98,6 +98,8 @@ describe("code run decorations", () => {
       listeners: new Set(),
       finished: Promise.resolve("done"),
       settle: () => {},
+      trustFolder: null,
+      launch: () => {},
     });
     let state = makeState(doc);
     state = state.update({ effects: setRun.of({ pos: fenceFrom, id: "r1" }) }).state;
@@ -160,6 +162,7 @@ describe("Run All", () => {
           data: { code: exit, cancelled: false, truncated: false, timedOut: false },
         }),
       );
+      return { status: "started" };
     });
     return ran;
   }
@@ -237,6 +240,95 @@ describe("Run Code Blocks setting", () => {
     expect(widgets(view.state)).toEqual([]);
     setEnabled(true);
     expect(widgets(view.state)).toHaveLength(1);
+    view.destroy();
+  });
+});
+
+describe("Trusted Folders", () => {
+  const doc = ["```bash\necho one\n```", "```bash\necho two\n```"].join("\n\n");
+  const folder = "/notes";
+
+  /** Fake backend that refuses until `folder` is trusted. */
+  function fakeTrustingBackend(): string[] {
+    const ran: string[] = [];
+    vi.mocked(tauri.runCode).mockReset();
+    vi.mocked(tauri.runCode).mockImplementation(async (_id, _lang, code, _cwd, onEvent) => {
+      const trusted = useSettingsStore.getState().settings["code.trusted-folders"];
+      if (!(Array.isArray(trusted) && trusted.includes(folder))) {
+        return { status: "needsTrust", folder };
+      }
+      ran.push(code.trim());
+      setTimeout(() =>
+        onEvent({
+          event: "exit",
+          data: { code: 0, cancelled: false, truncated: false, timedOut: false },
+        }),
+      );
+      return { status: "started" };
+    });
+    return ran;
+  }
+
+  function useFakeSettings(): ReturnType<typeof vi.fn> {
+    const setSetting = vi.fn(async (key: string, value: unknown) => {
+      useSettingsStore.setState((state) => ({ settings: { ...state.settings, [key]: value } }));
+    });
+    useSettingsStore.setState((state) => ({
+      settings: { ...state.settings, "code.trusted-folders": [] },
+      setSetting,
+    }));
+    return setSetting;
+  }
+
+  function makeView(): EditorView {
+    return new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc,
+        extensions: [markdown({ extensions: [GFM] }), codeRunExtension(() => `${folder}/a.md`)],
+      }),
+    });
+  }
+
+  const settled = () => new Promise((resolve) => setTimeout(resolve, 20));
+  const click = (view: EditorView, selector: string) =>
+    view.dom.querySelector<HTMLButtonElement>(selector)!.click();
+
+  test("asks before running in an untrusted folder; Allow saves it and runs", async () => {
+    const ran = fakeTrustingBackend();
+    const setSetting = useFakeSettings();
+    const view = makeView();
+
+    runCodeBlocks(view, "all");
+    await settled();
+    expect(ran).toEqual([]);
+    const tray = view.dom.querySelector<HTMLElement>(".cm-code-run-tray")!;
+    expect(tray.dataset.status).toBe("needs-trust");
+    expect(tray.querySelector(".cm-code-run-trust-folder")!.textContent).toBe(folder);
+
+    click(view, ".cm-code-run-trust-allow");
+    await settled();
+    expect(setSetting).toHaveBeenCalledWith("code.trusted-folders", [folder], "global");
+    // Run All carried on once the folder was allowed.
+    expect(ran).toEqual(["echo one", "echo two"]);
+    view.destroy();
+  });
+
+  test("Cancel stops the block and the Run All it belongs to", async () => {
+    const ran = fakeTrustingBackend();
+    const setSetting = useFakeSettings();
+    const view = makeView();
+
+    runCodeBlocks(view, "all");
+    await settled();
+    click(view, ".cm-code-run-trust-cancel");
+    await settled();
+    expect(setSetting).not.toHaveBeenCalled();
+    expect(ran).toEqual([]);
+    expect(view.dom.querySelectorAll(".cm-code-run-tray")).toHaveLength(1);
+    expect(view.dom.querySelector<HTMLElement>(".cm-code-run-tray")!.dataset.status).toBe(
+      "stopped",
+    );
     view.destroy();
   });
 });
