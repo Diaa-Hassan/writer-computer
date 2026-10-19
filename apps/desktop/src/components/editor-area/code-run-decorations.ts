@@ -291,9 +291,10 @@ async function allowTrust(view: EditorView, session: Session): Promise<void> {
   const current = store.settings[TRUSTED_SETTING];
   const trusted = Array.isArray(current) ? (current as string[]) : [];
   try {
-    if (!trusted.includes(folder)) {
-      await store.setSetting(TRUSTED_SETTING, [...trusted, folder], "global");
-    }
+    // Always write, even if the store already lists the folder: the store
+    // can be behind the backend (whose answer just said "not trusted"), and
+    // skipping the write would leave the block asking forever.
+    await store.setSetting(TRUSTED_SETTING, [...new Set([...trusted, folder])], "global");
   } catch (err) {
     session.trustFolder = null;
     appendChunk(session, "stderr", `Couldn't save Trusted Folders: ${String(err)}\n`);

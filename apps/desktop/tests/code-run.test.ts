@@ -314,6 +314,40 @@ describe("Trusted Folders", () => {
     view.destroy();
   });
 
+  test("Allow saves the folder even when a stale store already lists it", async () => {
+    const ran: string[] = [];
+    let backendTrusts = false;
+    vi.mocked(tauri.runCode).mockReset();
+    vi.mocked(tauri.runCode).mockImplementation(async (_id, _lang, code, _cwd, onEvent) => {
+      if (!backendTrusts) return { status: "needsTrust", folder };
+      ran.push(code.trim());
+      setTimeout(() =>
+        onEvent({
+          event: "exit",
+          data: { code: 0, cancelled: false, truncated: false, timedOut: false },
+        }),
+      );
+      return { status: "started" };
+    });
+    const setSetting = vi.fn(async () => {
+      backendTrusts = true;
+    });
+    // The store thinks the folder is trusted; the backend disagrees.
+    useSettingsStore.setState((state) => ({
+      settings: { ...state.settings, "code.trusted-folders": [folder] },
+      setSetting,
+    }));
+    const view = makeView();
+
+    runCodeBlocks(view, "all");
+    await settled();
+    click(view, ".cm-code-run-trust-allow");
+    await settled();
+    expect(setSetting).toHaveBeenCalledWith("code.trusted-folders", [folder], "global");
+    expect(ran).toEqual(["echo one", "echo two"]);
+    view.destroy();
+  });
+
   test("Cancel stops the block and the Run All it belongs to", async () => {
     const ran = fakeTrustingBackend();
     const setSetting = useFakeSettings();
