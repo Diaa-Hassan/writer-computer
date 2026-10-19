@@ -334,6 +334,8 @@ export interface RunOptions {
   fresh: boolean;
   /** The note's path: blocks with the same key share a session. */
   sessionKey?: string;
+  /** Variables the note declares (vars blocks, frontmatter `vars:`). */
+  vars?: Record<string, unknown>;
 }
 
 export function runCode(

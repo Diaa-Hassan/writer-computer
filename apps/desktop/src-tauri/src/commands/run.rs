@@ -590,6 +590,41 @@ pub struct RunOptions {
     fresh: bool,
     /// The note's path: blocks with the same key share a session.
     session_key: Option<String>,
+    /// Variables declared in the note (`vars` blocks, frontmatter `vars:`).
+    vars: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Declared variables, checked: names must be identifiers.
+pub(crate) fn checked_vars(
+    vars: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<(String, serde_json::Value)>, AppError> {
+    vars.iter()
+        .map(|(name, value)| {
+            let valid = name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if valid {
+                Ok((name.clone(), value.clone()))
+            } else {
+                Err(AppError::Message(format!(
+                    "`{name}` isn't a valid variable name (letters, digits and _, not starting with a digit)"
+                )))
+            }
+        })
+        .collect()
+}
+
+/// A variable as an environment value: strings as they are, numbers and
+/// booleans written out, lists and objects as JSON, null as empty.
+pub(crate) fn env_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) => value.to_string(),
+        _ => value.to_string(),
+    }
 }
 
 /// Environment that makes common tools emit colour when stdout is a pipe:
@@ -795,6 +830,7 @@ pub fn run_code(
     sessions: State<'_, Arc<super::session::Sessions>>,
 ) -> Result<RunStart, AppError> {
     let options = options.unwrap_or_default();
+    let vars = checked_vars(&options.vars)?;
     let settings = run_settings(&app, webview.label())?;
     if !settings.enabled {
         return Err(AppError::Message(
@@ -858,6 +894,7 @@ pub fn run_code(
                 // The session starts in the note's folder; `cwd=` moves it.
                 cd: options.dir.is_some().then(|| run_dir.clone()).flatten(),
                 color: options.color,
+                vars: vars.clone(),
                 timeout: run_timeout(&options, settings.timeout),
                 sink,
                 cancelled: Arc::new(AtomicBool::new(false)),
@@ -886,6 +923,7 @@ pub fn run_code(
         .env("PATH", path)
         .envs(RUN_ENV.iter().copied())
         .envs(if options.color { COLOR_ENV } else { &[] }.iter().copied())
+        .envs(vars.iter().map(|(name, value)| (name, env_value(value))))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1388,6 +1426,28 @@ mod tests {
         assert!(!tmp.path().join("writer-session-old").exists());
         assert!(tmp.path().join("writer-run-new").exists());
         assert!(tmp.path().join("someone-elses").exists());
+    }
+
+    #[test]
+    fn variables_need_identifier_names_and_become_env_strings() {
+        let mut vars = serde_json::Map::new();
+        vars.insert("port".into(), serde_json::json!(8080));
+        vars.insert("_name".into(), serde_json::json!("api"));
+        assert_eq!(checked_vars(&vars).unwrap().len(), 2);
+        vars.insert("1bad".into(), serde_json::json!(1));
+        assert!(checked_vars(&vars)
+            .unwrap_err()
+            .to_string()
+            .contains("`1bad`"));
+        let mut vars = serde_json::Map::new();
+        vars.insert("a-b".into(), serde_json::json!(1));
+        assert!(checked_vars(&vars).is_err());
+
+        assert_eq!(env_value(&serde_json::json!("x y")), "x y");
+        assert_eq!(env_value(&serde_json::json!(2.5)), "2.5");
+        assert_eq!(env_value(&serde_json::json!(true)), "true");
+        assert_eq!(env_value(&serde_json::json!(null)), "");
+        assert_eq!(env_value(&serde_json::json!([1, "a"])), r#"[1,"a"]"#);
     }
 
     #[test]

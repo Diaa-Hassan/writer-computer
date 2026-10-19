@@ -275,6 +275,21 @@ describe("Run All", () => {
     view.destroy();
   });
 
+  test("each run carries the note's declared variables", async () => {
+    fakeRuns([0]);
+    const view = new EditorView({
+      parent: document.body,
+      state: EditorState.create({
+        doc: "```vars\nport = 8080\n```\n\n```bash\necho $port\n```",
+        extensions: [markdown({ extensions: [GFM] }), codeRunExtension(() => "/notes/a.md")],
+      }),
+    });
+    runCodeBlocks(view, "all");
+    await vi.waitFor(() => expect(tauri.runCode).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(tauri.runCode).mock.calls[0][4]).toMatchObject({ vars: { port: 8080 } });
+    view.destroy();
+  });
+
   test("above runs only the blocks that end before the caret", async () => {
     const ran = fakeRuns([0, 0, 0, 0]);
     const view = makeView(doc.indexOf("exit 1"));

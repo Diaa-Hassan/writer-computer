@@ -34,6 +34,8 @@ import {
   writeRunStdin,
 } from "@/lib/tauri";
 import { type AnsiSegment, type AnsiStyle, parseAnsi, plainStyle, segmentCss } from "./ansi";
+import { noteVars } from "./code-vars";
+import { noteFrontmatter } from "./code-vars-decorations";
 import "./code-run.css";
 
 const runtimeByLang: Record<string, string> = runtimes;
@@ -420,7 +422,12 @@ function startRun(view: EditorView, fence: RunnableFence): Session {
   };
   session.launch = () => {
     const { dir, timeoutSeconds, color, fresh } = fence.options;
-    const options = { dir, timeoutSeconds, color, fresh, sessionKey: filePath || undefined };
+    // Read at launch, so a vars block edited since the last run counts.
+    const vars = noteVars(
+      view.state,
+      noteFrontmatter(() => filePath),
+    );
+    const options = { dir, timeoutSeconds, color, fresh, sessionKey: filePath || undefined, vars };
     runCode(id, fence.lang, fence.source, cwd, options, onEvent)
       .then((start) => {
         if (start.status === "started") {

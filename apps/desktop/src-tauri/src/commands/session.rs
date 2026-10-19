@@ -5,7 +5,7 @@
 //!
 //! The session runs a small driver (shell or Python). Writer hands it one
 //! block at a time over a control FIFO as one line of fields separated by
-//! US (`\x1f`): `id code-file input-fifo cd-dir color`. Not tabs: a shell's
+//! US (`\x1f`): `id code-file input-fifo cd-dir color vars-file`. Not tabs: a shell's
 //! `read` merges runs of whitespace separators, which would drop an empty
 //! field. The driver runs the file with
 //! the block's own input FIFO as stdin (so typed input reaches only that
@@ -28,7 +28,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 
 use super::run::{
-    kill_group, take_utf8, RunEvent, RunHandle, RunRegistry, Sink, StdinSlot, COLOR_ENV,
+    env_value, kill_group, take_utf8, RunEvent, RunHandle, RunRegistry, Sink, StdinSlot, COLOR_ENV,
     OUTPUT_LIMIT, RUN_ENV,
 };
 use crate::error::AppError;
@@ -141,6 +141,42 @@ pub fn take_pieces(buf: &mut String) -> Vec<Piece> {
     pieces
 }
 
+/// Single-quote a value for a POSIX shell.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+/// The declared variables as a file the session's driver loads before the
+/// block: `export name='value'` lines for shells (shell variables and
+/// environment both), or JSON with typed values and env strings for Python.
+fn write_vars(
+    dir: &Path,
+    runtime: &str,
+    vars: &[(String, serde_json::Value)],
+) -> Result<PathBuf, AppError> {
+    if runtime == "python" {
+        let values: serde_json::Map<_, _> = vars.iter().cloned().collect();
+        let env: serde_json::Map<_, _> = vars
+            .iter()
+            .map(|(name, value)| (name.clone(), serde_json::Value::String(env_value(value))))
+            .collect();
+        let path = dir.join("vars.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({ "values": values, "env": env }).to_string(),
+        )?;
+        Ok(path)
+    } else {
+        let lines: String = vars
+            .iter()
+            .map(|(name, value)| format!("export {name}={}\n", shell_quote(&env_value(value))))
+            .collect();
+        let path = dir.join("vars.sh");
+        std::fs::write(&path, lines)?;
+        Ok(path)
+    }
+}
+
 /// One control line, or an error if a field could break the protocol.
 pub fn control_line(
     id: &str,
@@ -148,6 +184,7 @@ pub fn control_line(
     input: &Path,
     cd: Option<&Path>,
     color: bool,
+    vars: Option<&Path>,
 ) -> Result<String, AppError> {
     let fields = [
         id.to_owned(),
@@ -156,6 +193,8 @@ pub fn control_line(
         cd.map(|d| d.to_string_lossy().into_owned())
             .unwrap_or_default(),
         if color { "1" } else { "0" }.to_owned(),
+        vars.map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     ];
     if fields.iter().any(|f| f.contains([US, '\n', '\r'])) {
         return Err(AppError::Message(
@@ -179,9 +218,10 @@ fn shell_driver() -> String {
     format!(
         r#"__w_us=$(printf '\037'); __w_rs=$(printf '\036')
 exec 3<"$1"
-while IFS="$__w_us" read -r __w_id __w_file __w_in __w_dir __w_color <&3; do
+while IFS="$__w_us" read -r __w_id __w_file __w_in __w_dir __w_color __w_vars <&3; do
   [ -n "$__w_dir" ] && cd "$__w_dir"
   [ "$__w_color" = 1 ] && export {exports}
+  [ -n "$__w_vars" ] && . "$__w_vars"
   . "$__w_file" <"$__w_in"
   __w_status=$?
   printf '%sWRITER-END %s %s%s' "$__w_rs" "$__w_id" "$__w_status" "$__w_rs"
@@ -213,13 +253,19 @@ while True:
         continue
     if not __w_line:
         break
-    __w_id, __w_file, __w_in, __w_dir, __w_color = __w_line.rstrip("\n").split("\x1f")
+    __w_id, __w_file, __w_in, __w_dir, __w_color, __w_vars = __w_line.rstrip("\n").split("\x1f")
     __w_status = 0
     try:
         if __w_dir:
             os.chdir(__w_dir)
         if __w_color == "1":
             os.environ.update({{{env}}})
+        if __w_vars:
+            import json as __w_json
+            with open(__w_vars, encoding="utf-8") as f:
+                __w_declared = __w_json.load(f)
+            __w_ns.update(__w_declared["values"])
+            os.environ.update(__w_declared["env"])
         with open(__w_file, encoding="utf-8") as f:
             __w_src = f.read()
         sys.stdin = open(__w_in, encoding="utf-8")
@@ -521,7 +567,17 @@ impl Sessions {
         std::fs::write(&file, &run.code)?;
         let input = block_dir.join("in");
         mkfifo(&input)?;
-        let line = control_line(&run.id, &file, &input, run.cd.as_deref(), run.color)?;
+        let vars_file = (!run.vars.is_empty())
+            .then(|| write_vars(&block_dir, runtime, &run.vars))
+            .transpose()?;
+        let line = control_line(
+            &run.id,
+            &file,
+            &input,
+            run.cd.as_deref(),
+            run.color,
+            vars_file.as_deref(),
+        )?;
 
         {
             let mut current = session.current.lock();
@@ -629,6 +685,8 @@ pub struct BlockRun {
     pub code: String,
     pub cd: Option<PathBuf>,
     pub color: bool,
+    /// Declared variables, set in the session before the block runs.
+    pub vars: Vec<(String, serde_json::Value)>,
     pub timeout: Option<Duration>,
     pub sink: Sink,
     pub cancelled: Arc<AtomicBool>,
@@ -699,16 +757,33 @@ mod tests {
 
     #[test]
     fn control_lines_refuse_tabs_and_newlines() {
-        let ok = control_line("id", Path::new("/t/b.sh"), Path::new("/t/in"), None, true).unwrap();
-        assert_eq!(ok, "id\u{1f}/t/b.sh\u{1f}/t/in\u{1f}\u{1f}1\n");
+        let ok = control_line(
+            "id",
+            Path::new("/t/b.sh"),
+            Path::new("/t/in"),
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(ok, "id\u{1f}/t/b.sh\u{1f}/t/in\u{1f}\u{1f}1\u{1f}\n");
         // Tabs are fine now; the separator and newlines aren't.
-        assert!(control_line("id", Path::new("/t/a\tb"), Path::new("/t/in"), None, false).is_ok());
+        assert!(control_line(
+            "id",
+            Path::new("/t/a\tb"),
+            Path::new("/t/in"),
+            None,
+            false,
+            None
+        )
+        .is_ok());
         assert!(control_line(
             "id",
             Path::new("/t/a\u{1f}b"),
             Path::new("/t/in"),
             None,
-            false
+            false,
+            None
         )
         .is_err());
         assert!(control_line(
@@ -716,7 +791,8 @@ mod tests {
             Path::new("/t/b"),
             Path::new("/t/in"),
             Some(Path::new("/x\ny")),
-            false
+            false,
+            None
         )
         .is_err());
     }
@@ -748,6 +824,8 @@ mod session_tests {
         registry: Arc<RunRegistry>,
         runtime: &'static str,
         program: PathBuf,
+        /// Declared variables sent with every block.
+        vars: Mutex<Vec<(String, serde_json::Value)>>,
     }
 
     impl Harness {
@@ -757,6 +835,7 @@ mod session_tests {
                 registry: Arc::new(RunRegistry::default()),
                 runtime,
                 program: program(binary)?,
+                vars: Mutex::new(Vec::new()),
             })
         }
 
@@ -779,6 +858,7 @@ mod session_tests {
                         code: code.into(),
                         cd: None,
                         color: false,
+                        vars: self.vars.lock().clone(),
                         timeout: None,
                         sink: Arc::new(move |event| {
                             let _ = tx.lock().send(event);
@@ -959,6 +1039,7 @@ mod session_tests {
                     code: "pwd; echo \"$FORCE_COLOR\"".into(),
                     cd: Some(PathBuf::from("/")),
                     color: true,
+                    vars: Vec::new(),
                     timeout: None,
                     sink: Arc::new(move |event| {
                         let _ = tx.lock().send(event);
@@ -982,6 +1063,39 @@ mod session_tests {
         assert!(dir.exists());
         h.sessions.end_all();
         assert!(!dir.exists());
+    }
+
+    fn declared() -> Vec<(String, serde_json::Value)> {
+        vec![
+            ("port".into(), serde_json::json!(8080)),
+            ("greeting".into(), serde_json::json!("it's \"quoted\"")),
+            ("tags".into(), serde_json::json!(["a", "b"])),
+            ("debug".into(), serde_json::json!(true)),
+        ]
+    }
+
+    #[test]
+    fn declared_variables_reach_shell_blocks_as_vars_and_env() {
+        let Some(h) = Harness::new("bash", "bash") else {
+            return;
+        };
+        *h.vars.lock() = declared();
+        let done = h.run("echo \"$port|$greeting|$tags|$debug\"; env | grep -c '^port=8080$'");
+        assert_eq!(done.stdout, "8080|it's \"quoted\"|[\"a\",\"b\"]|true\n1\n");
+        assert_eq!(done.stderr, "");
+    }
+
+    #[test]
+    fn declared_variables_reach_python_typed() {
+        let Some(h) = Harness::new("python", "python3") else {
+            return;
+        };
+        *h.vars.lock() = declared();
+        let done = h.run(
+            "import os\nprint(port + 1, type(port).__name__, greeting, tags[1], debug is True, os.environ['port'])",
+        );
+        assert_eq!(done.stdout, "8081 int it's \"quoted\" b True 8080\n");
+        assert_eq!(done.stderr, "");
     }
 
     #[test]

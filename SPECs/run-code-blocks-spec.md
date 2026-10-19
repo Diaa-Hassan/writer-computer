@@ -118,6 +118,13 @@ A note's **bash, zsh, sh and Python** blocks each run in one live session per la
 - **One block at a time** per session: running a second block while one is running says so in the tray.
 - **cwd / color in a session:** `cwd=` changes the session's folder from then on, and `color` exports the colour variables into the session, the same as typing `cd`/`export` there.
 
+## Variables
+
+- **Declare** them in a ` ```vars ` block, one `name = value` per line (`#` comments, blank lines fine), or in the frontmatter's `vars:` map. Values are typed: numbers, `true`/`false`, `null`, quoted strings, JSON lists/objects, otherwise the text itself; a `name:type = value` hint (`str`, `int`, `float`, `bool`, `json`) forces one. Frontmatter comes first, then vars blocks top to bottom (later wins). Names are identifiers (checked again by the backend).
+- **In code:** every run gets them. Fresh runs as environment variables (strings as is, numbers/booleans written out, lists/objects as JSON). Session blocks get a per-block file the driver loads first: `export name='value'` for shells (shell variables and environment), JSON for Python (typed values in the namespace plus `os.environ`). They are read when the block starts, so editing a vars block applies to the next run.
+- **In prose:** `{{name}}` shows the value as a chip (`{{ name }}` too; `\{{name}}` stays literal), only for declared names and never inside code, math, links or HTML; the caret on it shows the source. Not `$name`: Writer's inline math is `$…$` and two `$name`s on a line parse as a formula. The chips refresh when the text or the note's frontmatter changes.
+- **Not included:** values changed by code flowing back (a block setting `count = 30` doesn't update `{{count}}`), or across languages.
+
 ## Design
 
 - `shared/code-runtimes.json` maps every fence language and alias → runtime id. The editor reads it to decide where to show Run and sends the id; `RUNTIMES` in `commands/run.rs` holds each runtime's tools. A test checks every mapped id exists and every runtime is reachable under its own name.
@@ -133,7 +140,7 @@ Add a `Runtime` to `RUNTIMES` in `commands/run.rs` (its tools, each `inline(prog
 
 ## Non-goals (this version)
 
-- Values shared across languages (bash ↔ Python), and Python-style sessions for other languages.
+- Values flowing back from code, or across languages (bash ↔ Python); sessions for languages other than bash, zsh, sh and Python.
 - A terminal/TTY (programs see pipes; `color` covers the common colour switches), carriage-return progress bars redrawing in place.
 - Saving output into the note.
 - Running from Reading/preview surfaces other than the editor.

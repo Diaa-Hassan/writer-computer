@@ -366,3 +366,14 @@
 .cm-editor .cm-code-run-stdin {
   color: var(--accent);
 }
+
+/* `$name` in prose: the declared variable's value (code-vars-decorations.ts). */
+.cm-editor .cm-code-var {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text-primary);
+  font-family: var(--pm-code-font, ui-monospace, monospace);
+  font-size: 0.88em;
+  white-space: nowrap;
+}
